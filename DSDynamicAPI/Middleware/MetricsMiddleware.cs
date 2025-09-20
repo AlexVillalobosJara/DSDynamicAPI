@@ -1,4 +1,7 @@
-// Middleware para métricas y monitoreo
+
+// =====================================================
+// MetricsMiddleware - ACTUALIZADO
+// =====================================================
 using System.Diagnostics;
 
 public class MetricsMiddleware
@@ -20,14 +23,16 @@ public class MetricsMiddleware
 
         stopwatch.Stop();
 
-        // Log de métricas
+        // Log de métricas con información de autenticación
         if (context.Items["RequestContext"] is RequestContext requestContext && requestContext.IdAPI.HasValue)
         {
-            _logger.LogInformation("API Execution Metrics: IdAPI={IdAPI}, Duration={DurationMs}, Status={StatusCode}, Success={Success}",
+            _logger.LogInformation("API Execution Metrics: IdAPI={IdAPI}, Duration={DurationMs}, Status={StatusCode}, Success={Success}, Auth={TipoAuth}, Credencial={IdCredencial}",
                 requestContext.IdAPI.Value,
                 stopwatch.ElapsedMilliseconds,
                 context.Response.StatusCode,
-                context.Response.StatusCode >= 200 && context.Response.StatusCode < 400);
+                context.Response.StatusCode >= 200 && context.Response.StatusCode < 400,
+                requestContext.TipoAuth ?? "NONE",
+                requestContext.IdCredencial);
         }
     }
 }

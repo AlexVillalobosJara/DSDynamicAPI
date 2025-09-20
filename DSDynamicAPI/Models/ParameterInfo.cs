@@ -1,4 +1,5 @@
-﻿// Información de parámetro para documentación
+﻿
+// Información de parámetro para documentación
 public class ParameterInfo
 {
     public string Nombre { get; set; } = string.Empty;

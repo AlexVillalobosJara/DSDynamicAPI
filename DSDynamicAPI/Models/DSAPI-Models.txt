@@ -1,0 +1,789 @@
+﻿// Actividad reciente del sistema de auth
+//public class ActivityDto
+//{
+//    public DateTime Timestamp { get; set; }
+//    public string EventType { get; set; } = string.Empty; // AUTH_SUCCESS, AUTH_FAILED, CREDENTIAL_CREATED, etc.
+//    public int IdAPI { get; set; }
+//    public int? IdCredencial { get; set; }
+//    public string? Description { get; set; }
+//    public string? IPAddress { get; set; }
+//}
+// Configuraci n de API desde base de datos (ACTUALIZADO)
+using System.Text.Json;
+
+public class ApiConfiguration
+{
+    public int IdAPI { get; set; }
+    public string NombreAPI { get; set; } = string.Empty;
+    public string Descripcion { get; set; } = string.Empty;
+    public string ObjetoSQL { get; set; } = string.Empty;
+    public string TipoObjeto { get; set; } = string.Empty;
+    public bool EsActivo { get; set; }
+    public int RateLimitPorMinuto { get; set; }
+
+    // NUEVOS CAMPOS DE AUTENTICACI N
+    public string TipoAutenticacion { get; set; } = string.Empty;
+    public string NombreTipoAuth { get; set; } = string.Empty;
+    public string? ConfiguracionAuth { get; set; }
+
+    public string StringConexionTest { get; set; } = string.Empty;
+    public string StringConexionProduccion { get; set; } = string.Empty;
+    public int TimeoutEjecucionSegundos { get; set; } = 30;
+    public List<ApiParameter> Parametros { get; set; } = new();
+
+    // M todos para manejar configuraci n de autenticaci n
+    public T? GetConfiguracionAuth<T>() where T : class
+    {
+        if (string.IsNullOrWhiteSpace(ConfiguracionAuth))
+            return null;
+
+        try
+        {
+            return JsonSerializer.Deserialize<T>(ConfiguracionAuth);
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    public void SetConfiguracionAuth<T>(T configuracion) where T : class
+    {
+        ConfiguracionAuth = configuracion != null
+            ? JsonSerializer.Serialize(configuracion)
+            : null;
+    }
+}
+// Request para ejecutar API (ACTUALIZADO)
+using System.ComponentModel.DataAnnotations;
+
+public class ApiExecutionRequest
+{
+    [Required]
+    public int IdAPI { get; set; }
+
+    [Required]
+    public string Environment { get; set; } = "PRODUCTION";
+
+    public Dictionary<string, object?> Parameters { get; set; } = new();
+
+    // NUEVOS CAMPOS PARA AUTENTICACI N
+    public string? AuthType { get; set; }
+    public string? Credential { get; set; }
+    public Dictionary<string, string> Headers { get; set; } = new();
+}
+// Response de ejecuci n (ACTUALIZADO)
+public class ApiExecutionResponse
+{
+    public bool Success { get; set; }
+    public object? Data { get; set; }
+    public string? Message { get; set; }
+    public int ExecutionTimeMs { get; set; }
+    public DateTime Timestamp { get; set; } = DateTime.UtcNow;
+    public string RequestId { get; set; } = Guid.NewGuid().ToString();
+
+    // NUEVOS CAMPOS
+    public string? AuthType { get; set; }
+    public int? CredentialId { get; set; }
+    public string Environment { get; set; } = string.Empty;
+    public Dictionary<string, object> Metadata { get; set; } = new();
+}
+// Informaci n de API disponible (ACTUALIZADO)
+public class ApiInfo
+{
+    public int IdAPI { get; set; }
+    public string NombreAPI { get; set; } = string.Empty;
+    public string Descripcion { get; set; } = string.Empty;
+    public string TipoObjeto { get; set; } = string.Empty;
+    public string TipoAutenticacion { get; set; } = string.Empty;
+    public string NombreTipoAuth { get; set; } = string.Empty;
+    public List<ParameterInfo> Parametros { get; set; } = new();
+    public string Endpoint { get; set; } = string.Empty;
+    public string ExampleCall { get; set; } = string.Empty;
+    public string AuthHeaderExample { get; set; } = string.Empty;
+}
+// Par metros de API (ACTUALIZADO)
+public class ApiParameter
+{
+    public string NombreParametro { get; set; } = string.Empty;
+    public string TipoParametro { get; set; } = string.Empty;
+    public bool EsObligatorio { get; set; }
+    public string? ValorPorDefecto { get; set; }
+    public int Orden { get; set; }
+    public string? Descripcion { get; set; }
+}﻿// Log de auditoría (ACTUALIZADO)
+public class AuditLog
+{
+    public int IdAPI { get; set; }
+    public int? IdCredencial { get; set; }
+    public string Ambiente { get; set; } = string.Empty;
+    public string? ParametrosEnviados { get; set; }
+    public bool EsExitoso { get; set; }
+    public string? MensajeError { get; set; }
+    public int TiempoEjecucionMs { get; set; }
+    public string? DireccionIP { get; set; }
+    public DateTime FechaEjecucion { get; set; }
+
+    // Propiedades de navegación
+    public string NombreAPI { get; set; } = string.Empty;
+    public string? NombreCredencial { get; set; }
+    public string? TipoAutenticacion { get; set; }
+
+    // Propiedades calculadas
+    public string EstadoTexto => EsExitoso ? "Exitoso" : "Fallido";
+    public string BadgeClass => EsExitoso ? "badge-success" : "badge-danger";
+    public string TiempoEjecucionTexto => $"{TiempoEjecucionMs}ms";
+    public string FechaEjecucionTexto => FechaEjecucion.ToString("dd/MM/yyyy HH:mm:ss");
+}
+﻿
+// Configuración JWT
+using System.ComponentModel.DataAnnotations;
+
+public class JWTConfiguration
+{
+    [Required]
+    public string Issuer { get; set; } = string.Empty;
+
+    [Required]
+    public string Audience { get; set; } = string.Empty;
+
+    [Required]
+    [MinLength(32, ErrorMessage = "La clave secreta debe tener al menos 32 caracteres")]
+    public string SecretKey { get; set; } = string.Empty;
+
+    public bool ValidateLifetime { get; set; } = true;
+    public int ClockSkewSeconds { get; set; } = 300;
+    public bool ValidateIssuer { get; set; } = true;
+    public bool ValidateAudience { get; set; } = true;
+    public bool ValidateIssuerSigningKey { get; set; } = true;
+}
+
+// Configuración OAuth2
+public class OAuth2Configuration
+{
+    [Required]
+    [Url]
+    public string AuthorizationServer { get; set; } = string.Empty;
+
+    [Required]
+    [Url]
+    public string TokenEndpoint { get; set; } = string.Empty;
+
+    [Url]
+    public string? IntrospectionEndpoint { get; set; }
+
+    [Required]
+    public string ClientId { get; set; } = string.Empty;
+
+    [Required]
+    public string ClientSecret { get; set; } = string.Empty;
+
+    public List<string> RequiredScopes { get; set; } = new();
+    public int TokenCacheMinutes { get; set; } = 5;
+}
+
+// Configuración NTLM
+public class NTLMConfiguration
+{
+    public string? Domain { get; set; }
+    public List<string> RequiredGroups { get; set; } = new();
+    public List<string> AllowedUsers { get; set; } = new();
+    public bool RequireAuthentication { get; set; } = true;
+}
+
+// Configuración Basic Auth
+public class BasicAuthConfiguration
+{
+    [Required]
+    public List<BasicAuthUser> Users { get; set; } = new();
+
+    public bool RequireHttps { get; set; } = true;
+    public int MaxFailedAttempts { get; set; } = 3;
+    public int LockoutMinutes { get; set; } = 15;
+}
+
+public class BasicAuthUser
+{
+    [Required]
+    public string Username { get; set; } = string.Empty;
+
+    [Required]
+    public string PasswordHash { get; set; } = string.Empty; // Debe ser un hash, no texto plano
+
+    public List<string> Roles { get; set; } = new();
+    public bool IsActive { get; set; } = true;
+    public DateTime? LastLogin { get; set; }
+    public int FailedAttempts { get; set; }
+    public DateTime? LockoutUntil { get; set; }
+}﻿// Nuevo modelo para errores de autenticación
+public class AuthenticationError
+{
+    public string Error { get; set; } = string.Empty;
+    public string Message { get; set; } = string.Empty;
+    public string RequiredAuthType { get; set; } = string.Empty;
+    public string AuthHeaderExample { get; set; } = string.Empty;
+    public int StatusCode { get; set; }
+    public string RequestId { get; set; } = string.Empty;
+    public DateTime Timestamp { get; set; } = DateTime.UtcNow;
+}﻿// Respuesta de error de autenticación
+public class AuthenticationErrorResponse : ErrorResponse
+{
+    public string RequiredAuthType { get; set; } = string.Empty;
+    public string AuthHeaderExample { get; set; } = string.Empty;
+    public List<string> SupportedAuthTypes { get; set; } = new();
+    public bool IsPublicAPI { get; set; }
+}﻿
+// Opciones de autenticación
+public class AuthenticationOptions
+{
+    public JWTOptions JWT { get; set; } = new();
+    public OAuth2Options OAuth2 { get; set; } = new();
+    public RateLimitOptions RateLimit { get; set; } = new();
+    public SecurityOptions Security { get; set; } = new();
+}
+
+public class JWTOptions
+{
+    public string DefaultIssuer { get; set; } = string.Empty;
+    public string DefaultAudience { get; set; } = string.Empty;
+    public string DefaultSecretKey { get; set; } = string.Empty;
+    public int DefaultExpirationMinutes { get; set; } = 60;
+    public int ClockSkewSeconds { get; set; } = 300;
+}
+
+public class OAuth2Options
+{
+    public int DefaultTokenCacheMinutes { get; set; } = 5;
+    public int DefaultClientTimeoutSeconds { get; set; } = 30;
+    public bool ValidateIssuer { get; set; } = true;
+    public bool ValidateAudience { get; set; } = true;
+}
+
+public class RateLimitOptions
+{
+    public int DefaultLimitPerMinute { get; set; } = 100;
+    public int PublicAPILimit { get; set; } = 50;
+    public int AuthenticatedAPILimit { get; set; } = 200;
+    public int PremiumAPILimit { get; set; } = 500;
+}
+
+public class SecurityOptions
+{
+    public bool EnableIPWhitelist { get; set; } = false;
+    public List<string> AllowedIPs { get; set; } = new();
+    public bool BlockSuspiciousRequests { get; set; } = true;
+    public int MaxFailedAttemptsPerIP { get; set; } = 10;
+    public int BlockDurationMinutes { get; set; } = 15;
+    public bool RequireHttps { get; set; } = true;
+}
+﻿// Estadísticas de autenticación
+//public class AuthStatsDto
+//{
+//    public int IdAPI { get; set; }
+//    public string NombreAPI { get; set; } = string.Empty;
+//    public TipoAutenticacion TipoAuth { get; set; }
+//    public int TotalCredenciales { get; set; }
+//    public int CredencialesActivas { get; set; }
+//    public int CredencialesExpiradas { get; set; }
+//    public int AuthenticationsToday { get; set; }
+//    public int FailedAuthsToday { get; set; }
+//    public double SuccessRate { get; set; }
+//    public DateTime? LastAuthentication { get; set; }
+//}﻿public class AuthUsageStatisticsDto
+{
+    public TipoAutenticacion TipoAuth { get; set; }
+    public string NombreTipoAuth { get; set; } = string.Empty;
+    public int TotalAPIs { get; set; }
+    public int TotalCredentials { get; set; }
+    public int TotalExecutions { get; set; }
+    public int SuccessfulExecutions { get; set; }
+    public int FailedExecutions { get; set; }
+    public double SuccessRate { get; set; }
+    public double AverageExecutionTimeMs { get; set; }
+    public DateTime? FirstExecution { get; set; }
+    public DateTime? LastExecution { get; set; }
+
+    // Propiedades calculadas
+    public string SuccessRateText => $"{SuccessRate:F1}%";
+    public string AverageExecutionTimeText => $"{AverageExecutionTimeMs:F1}ms";
+    public string TipoAuthText => TipoAuth.ToString();
+}﻿// Resultado de validación de autenticación
+public class AuthValidationResult
+{
+    public bool IsValid { get; set; }
+    public bool RateLimitExceeded { get; set; }
+    public int IdAPI { get; set; }
+    public int? IdCredencial { get; set; }
+    public string TipoAuth { get; set; } = string.Empty;
+    public string? ErrorMessage { get; set; }
+    public int RemainingRequests { get; set; }
+    public DateTime? ResetTime { get; set; }
+    public string? ConfigAuth { get; set; }
+    public Dictionary<string, object>? AuthMetadata { get; set; }
+}﻿
+// =====================================================
+// MODELOS DE CONFIGURACIÓN AVANZADA
+// =====================================================
+
+// Configuración de cache
+public class CacheOptions
+{
+    public bool EnableCaching { get; set; } = true;
+    public int DefaultExpirationMinutes { get; set; } = 5;
+    public int MaxCacheSize { get; set; } = 1000;
+    public bool EnableDistributedCache { get; set; } = false;
+    public string? RedisConnectionString { get; set; }
+}
+
+// Configuración de performance
+public class PerformanceOptions
+{
+    public bool EnableResponseCompression { get; set; } = true;
+    public bool EnableResponseCaching { get; set; } = true;
+    public int MaxRequestSizeBytes { get; set; } = 10485760; // 10MB
+    public int RequestTimeoutSeconds { get; set; } = 30;
+    public bool EnableQueryOptimization { get; set; } = true;
+}
+
+// Configuración de monitoreo
+public class MonitoringOptions
+{
+    public bool EnableDetailedMetrics { get; set; } = true;
+    public int MetricsRetentionDays { get; set; } = 30;
+    public bool EnableHealthChecks { get; set; } = true;
+    public int HealthCheckIntervalSeconds { get; set; } = 30;
+    public bool EnableAlerts { get; set; } = true;
+    public List<string> AlertRecipients { get; set; } = new();
+}
+﻿using System.Text.Json;
+
+public class CredencialAPIDto
+{
+    public int IdCredencial { get; set; }
+    public int IdAPI { get; set; }
+    public string TipoAutenticacion { get; set; } = string.Empty;
+    public string Nombre { get; set; } = string.Empty;
+    public string ValorCredencial { get; set; } = string.Empty;
+    public string? ConfiguracionExtra { get; set; }
+    public DateTime FechaCreacion { get; set; }
+    public DateTime? FechaExpiracion { get; set; }
+    public DateTime? UltimoUso { get; set; }
+    public int ContadorUsos { get; set; }
+    public bool EsActivo { get; set; }
+    public string CreadoPor { get; set; } = string.Empty;
+
+    // Propiedades de navegación
+    public string NombreTipoAuth { get; set; } = string.Empty;
+    public string? NombreAPI { get; set; }
+
+    // Propiedades calculadas
+    public bool EstaExpirada { get; set; }
+    public int? DaysUntilExpiration { get; set; }
+    public string ValorEnmascarado { get; set; } = string.Empty;
+    public string EstadoTexto { get; set; } = string.Empty;
+    public string FechaExpiracionTexto { get; set; } = string.Empty;
+    public string UltimoUsoTexto { get; set; } = string.Empty;
+
+    public string BadgeClass => EsActivo
+        ? (EstaExpirada ? "badge-danger" : "badge-success")
+        : "badge-secondary";
+
+    // Métodos para manejar configuración JSON
+    public T? GetConfiguracionExtra<T>() where T : class
+    {
+        if (string.IsNullOrWhiteSpace(ConfiguracionExtra))
+            return null;
+
+        try
+        {
+            return JsonSerializer.Deserialize<T>(ConfiguracionExtra);
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    public void SetConfiguracionExtra<T>(T configuracion) where T : class
+    {
+        ConfiguracionExtra = configuracion != null
+            ? JsonSerializer.Serialize(configuracion)
+            : null;
+    }
+}﻿// Estadísticas de credenciales específicas
+//public class CredentialStatsDto
+//{
+//    public int IdCredencial { get; set; }
+//    public string Nombre { get; set; } = string.Empty;
+//    public TipoAutenticacion TipoAuth { get; set; }
+//    public int UsesToday { get; set; }
+//    public int UsesThisMonth { get; set; }
+//    public int TotalUses { get; set; }
+//    public int FailedAttempts { get; set; }
+//    public DateTime? LastUsed { get; set; }
+//    public DateTime? LastFailed { get; set; }
+//    public bool IsNearRateLimit { get; set; }
+//    public bool IsExpiringSoon { get; set; }
+//}﻿// Estadísticas de credenciales
+public class CredentialUsageStats
+{
+    public int IdCredencial { get; set; }
+    public string NombreCredencial { get; set; } = string.Empty;
+    public string TipoAuth { get; set; } = string.Empty;
+    public int TotalUses { get; set; }
+    public int SuccessfulUses { get; set; }
+    public int FailedUses { get; set; }
+    public DateTime? LastUsed { get; set; }
+    public DateTime? FirstUsed { get; set; }
+    public double SuccessRate => TotalUses > 0 ? (double)SuccessfulUses / TotalUses * 100 : 0;
+}
+﻿
+// Request para validación de credenciales
+using System.ComponentModel.DataAnnotations;
+
+public class CredentialValidationRequest
+{
+    [Required]
+    public int IdAPI { get; set; }
+
+    [Required]
+    public TipoAutenticacion TipoAuth { get; set; }
+
+    public string? Credential { get; set; }
+    public string Environment { get; set; } = "PRODUCTION";
+    public Dictionary<string, string> Headers { get; set; } = new();
+    public string? IPAddress { get; set; }
+}
+
+// Resultado de validación de autenticación
+//public class AuthValidationResult
+//{
+//    public bool IsValid { get; set; }
+//    public bool RateLimitExceeded { get; set; }
+//    public int IdAPI { get; set; }
+//    public int? IdCredencial { get; set; }
+//    public string TipoAuth { get; set; } = string.Empty;
+//    public string? ErrorMessage { get; set; }
+//    public int RemainingRequests { get; set; }
+//    public DateTime? ResetTime { get; set; }
+//    public string? ConfigAuth { get; set; }
+//    public Dictionary<string, object> AuthMetadata { get; set; } = new();
+//}
+
+// Estadísticas de autenticación
+public class AuthStatsDto
+{
+    public int IdAPI { get; set; }
+    public string NombreAPI { get; set; } = string.Empty;
+    public TipoAutenticacion TipoAuth { get; set; }
+    public string NombreTipoAuth { get; set; } = string.Empty;
+    public int TotalCredenciales { get; set; }
+    public int CredencialesActivas { get; set; }
+    public int CredencialesExpiradas { get; set; }
+    public int AuthenticationsToday { get; set; }
+    public int FailedAuthsToday { get; set; }
+    public double SuccessRate { get; set; }
+    public DateTime? LastAuthentication { get; set; }
+
+    // Propiedades calculadas
+    public string SuccessRateText => $"{SuccessRate:F1}%";
+    public string LastAuthenticationText => LastAuthentication?.ToString("dd/MM/yyyy HH:mm") ?? "Nunca";
+}
+
+// Actividad reciente del sistema de auth
+public class ActivityDto
+{
+    public DateTime Timestamp { get; set; }
+    public string EventType { get; set; } = string.Empty; // AUTH_SUCCESS, AUTH_FAILED, CREDENTIAL_CREATED, etc.
+    public int IdAPI { get; set; }
+    public int? IdCredencial { get; set; }
+    public string? Description { get; set; }
+    public string? IPAddress { get; set; }
+
+    // Propiedades calculadas
+    public string TimestampText => Timestamp.ToString("dd/MM/yyyy HH:mm:ss");
+    public string EventTypeText => EventType switch
+    {
+        "AUTH_SUCCESS" => "Autenticación exitosa",
+        "AUTH_FAILED" => "Autenticación fallida",
+        "CREDENTIAL_CREATED" => "Credencial creada",
+        "CREDENTIAL_EXPIRED" => "Credencial expirada",
+        "CREDENTIAL_REVOKED" => "Credencial revocada",
+        _ => EventType
+    };
+}
+
+// Estado de salud del sistema de autenticación
+public class SystemAuthHealthDto
+{
+    public bool IsHealthy { get; set; }
+    public int TotalAPIs { get; set; }
+    public int APIsWithAuth { get; set; }
+    public int TotalCredentials { get; set; }
+    public int ActiveCredentials { get; set; }
+    public int ExpiredCredentials { get; set; }
+    public int CredentialsExpiringSoon { get; set; }
+    public Dictionary<TipoAutenticacion, int> AuthTypeDistribution { get; set; } = new();
+    public List<string> Warnings { get; set; } = new();
+    public List<string> Errors { get; set; } = new();
+
+    // Propiedades calculadas
+    public string HealthStatus => IsHealthy ? "Saludable" : (Errors.Any() ? "Crítico" : "Advertencia");
+    public string HealthBadgeClass => IsHealthy ? "badge-success" : (Errors.Any() ? "badge-danger" : "badge-warning");
+}
+
+// Estadísticas de credenciales específicas
+public class CredentialStatsDto
+{
+    public int IdCredencial { get; set; }
+    public string Nombre { get; set; } = string.Empty;
+    public TipoAutenticacion TipoAuth { get; set; }
+    public int UsesToday { get; set; }
+    public int UsesThisMonth { get; set; }
+    public int TotalUses { get; set; }
+    public int FailedAttempts { get; set; }
+    public DateTime? LastUsed { get; set; }
+    public DateTime? LastFailed { get; set; }
+    public bool IsNearRateLimit { get; set; }
+    public bool IsExpiringSoon { get; set; }
+
+    // Propiedades calculadas
+    public string LastUsedText => LastUsed?.ToString("dd/MM/yyyy HH:mm") ?? "Nunca";
+    public string LastFailedText => LastFailed?.ToString("dd/MM/yyyy HH:mm") ?? "Nunca";
+    public string TipoAuthText => TipoAuth.ToString();
+}// Opciones de configuraci n de base de datos (EXTENDIDAS)
+public class DatabaseOptions
+{
+    public string ConfigConnectionString { get; set; } = string.Empty;
+    public int DefaultCommandTimeout { get; set; } = 30;
+    public bool EnableConnectionPooling { get; set; } = true;
+    public int MaxPoolSize { get; set; } = 100;
+    public int MinPoolSize { get; set; } = 0;
+    public bool EnableRetryOnFailure { get; set; } = true;
+    public int MaxRetryAttempts { get; set; } = 3;
+    public bool LogSqlQueries { get; set; } = false;
+    public bool EnablePerformanceCounters { get; set; } = false;
+}// Respuesta de error est ndar (ACTUALIZADA)
+public class ErrorResponse
+{
+    public string Error { get; set; } = string.Empty;
+    public string Message { get; set; } = string.Empty;
+    public int StatusCode { get; set; }
+    public string RequestId { get; set; } = Guid.NewGuid().ToString();
+    public DateTime Timestamp { get; set; } = DateTime.UtcNow;
+
+    // NUEVOS CAMPOS
+    public string? RequiredAuthType { get; set; }
+    public string? AuthHeaderExample { get; set; }
+    public Dictionary<string, object> Details { get; set; } = new();
+}﻿// Estadísticas por IP
+public class IPUsageStats
+{
+    public string IPAddress { get; set; } = string.Empty;
+    public int TotalRequests { get; set; }
+    public int SuccessfulRequests { get; set; }
+    public int FailedRequests { get; set; }
+    public int UniqueAPIs { get; set; }
+    public int UniqueCredentials { get; set; }
+    public DateTime FirstAccess { get; set; }
+    public DateTime LastAccess { get; set; }
+    public double SuccessRate => TotalRequests > 0 ? (double)SuccessfulRequests / TotalRequests * 100 : 0;
+}﻿
+// Información de parámetro para documentación
+public class ParameterInfo
+{
+    public string Nombre { get; set; } = string.Empty;
+    public string Tipo { get; set; } = string.Empty;
+    public bool Requerido { get; set; }
+    public string? ValorPorDefecto { get; set; }
+    public string? Descripcion { get; set; }
+}﻿
+// =====================================================
+// MODELOS DE FUNCIONES ESPECÍFICAS
+// =====================================================
+
+// Resultado de validación de parámetros
+public class ParameterValidationResult
+{
+    public bool IsValid { get; set; }
+    public List<string> Errors { get; set; } = new();
+    public Dictionary<string, object?> ValidatedParameters { get; set; } = new();
+}
+
+// Información de conexión de base de datos
+public class DatabaseConnectionInfo
+{
+    public string ServerName { get; set; } = string.Empty;
+    public string DatabaseName { get; set; } = string.Empty;
+    public string Version { get; set; } = string.Empty;
+    public bool IsConnected { get; set; }
+    public TimeSpan ConnectionTime { get; set; }
+    public DateTime LastTestedAt { get; set; }
+}
+
+// Resultado de prueba de API
+public class ApiTestResult
+{
+    public int IdAPI { get; set; }
+    public string NombreAPI { get; set; } = string.Empty;
+    public bool IsSuccessful { get; set; }
+    public string? ErrorMessage { get; set; }
+    public int ExecutionTimeMs { get; set; }
+    public object? TestData { get; set; }
+    public DateTime TestedAt { get; set; } = DateTime.UtcNow;
+    public string Environment { get; set; } = string.Empty;
+}// Contexto de request para middleware (ACTUALIZADO)
+public class RequestContext
+{
+    public string RequestId { get; set; } = Guid.NewGuid().ToString();
+    public DateTime StartTime { get; set; } = DateTime.UtcNow;
+    public string? Credential { get; set; } // Reemplaza Token
+    public int? IdAPI { get; set; }
+    public int? IdCredencial { get; set; } // Reemplaza IdToken
+    public string? TipoAuth { get; set; } = "NONE"; // Nuevo campo
+    public string Environment { get; set; } = "PRODUCTION";
+    public string? ClientIP { get; set; }
+    public Dictionary<string, object> Metadata { get; set; } = new();
+}﻿
+// =====================================================
+// MODELOS DE ALERTAS Y NOTIFICACIONES
+// =====================================================
+
+// Alerta de seguridad
+public class SecurityAlert
+{
+    public string Id { get; set; } = Guid.NewGuid().ToString();
+    public string Type { get; set; } = string.Empty; // FAILED_AUTH_SPIKE, HIGH_USAGE, etc.
+    public string Severity { get; set; } = string.Empty; // LOW, MEDIUM, HIGH, CRITICAL
+    public string Message { get; set; } = string.Empty;
+    public string? Source { get; set; } // IP, Credential, API, etc.
+    public Dictionary<string, object> Details { get; set; } = new();
+    public DateTime Timestamp { get; set; } = DateTime.UtcNow;
+    public bool IsResolved { get; set; }
+    public DateTime? ResolvedAt { get; set; }
+}
+
+// Notificación del sistema
+public class SystemNotification
+{
+    public string Id { get; set; } = Guid.NewGuid().ToString();
+    public string Type { get; set; } = string.Empty; // INFO, WARNING, ERROR
+    public string Title { get; set; } = string.Empty;
+    public string Message { get; set; } = string.Empty;
+    public DateTime Timestamp { get; set; } = DateTime.UtcNow;
+    public bool IsRead { get; set; }
+    public string? ActionUrl { get; set; }
+    public Dictionary<string, object> Metadata { get; set; } = new();
+}﻿// Estado de salud del sistema de autenticación
+//public class SystemAuthHealthDto
+//{
+//    public bool IsHealthy { get; set; }
+//    public int TotalAPIs { get; set; }
+//    public int APIsWithAuth { get; set; }
+//    public int TotalCredentials { get; set; }
+//    public int ActiveCredentials { get; set; }
+//    public int ExpiredCredentials { get; set; }
+//    public int CredentialsExpiringSoon { get; set; }
+//    public Dictionary<TipoAutenticacion, int> AuthTypeDistribution { get; set; } = new();
+//    public List<string> Warnings { get; set; } = new();
+//    public List<string> Errors { get; set; } = new();
+//}﻿public class SystemConfigDto
+{
+    public int IdConfig { get; set; }
+    public string StringConexionTest { get; set; } = string.Empty;
+    public string StringConexionProduccion { get; set; } = string.Empty;
+    public int TimeoutEjecucionSegundos { get; set; } = 30;
+    public string UrlBaseDinamica { get; set; } = string.Empty;
+    public bool RequiereHttps { get; set; } = true;
+    public int RateLimitGlobal { get; set; } = 1000;
+    public string? ConfiguracionAdicional { get; set; }
+    public DateTime FechaModificacion { get; set; }
+    public string ModificadoPor { get; set; } = string.Empty;
+}﻿
+// =====================================================
+// MODELOS DE RESPUESTA DEL SISTEMA
+// =====================================================
+
+// Información del sistema
+public class SystemInfo
+{
+    public string ApplicationName { get; set; } = "Dynamic API";
+    public string Version { get; set; } = "2.0.0";
+    public string Environment { get; set; } = string.Empty;
+    public DateTime StartTime { get; set; }
+    public TimeSpan Uptime { get; set; }
+    public List<AuthTypeInfo> SupportedAuthTypes { get; set; } = new();
+    public SystemHealth Health { get; set; } = new();
+}
+
+public class AuthTypeInfo
+{
+    public string Type { get; set; } = string.Empty;
+    public string Description { get; set; } = string.Empty;
+    public string HeaderExample { get; set; } = string.Empty;
+    public bool RequiresConfiguration { get; set; }
+    public bool IsActive { get; set; }
+}
+
+public class SystemHealth
+{
+    public bool IsHealthy { get; set; }
+    public string Status { get; set; } = string.Empty;
+    public List<HealthCheck> Checks { get; set; } = new();
+    public DateTime LastCheck { get; set; }
+}
+
+public class HealthCheck
+{
+    public string Name { get; set; } = string.Empty;
+    public bool IsHealthy { get; set; }
+    public string Status { get; set; } = string.Empty;
+    public string? Description { get; set; }
+    public TimeSpan ResponseTime { get; set; }
+}﻿public class TipoAutenticacionDto
+{
+    public int IdTipoAuth { get; set; }
+    public string Codigo { get; set; } = string.Empty;
+    public string Nombre { get; set; } = string.Empty;
+    public string? Descripcion { get; set; }
+    public bool RequiereConfiguracion { get; set; }
+    public bool EsActivo { get; set; }
+    public DateTime FechaCreacion { get; set; }
+
+    // Propiedades calculadas
+    public string EstadoTexto => EsActivo ? "Activo" : "Inactivo";
+    public string BadgeClass => EsActivo ? "badge-success" : "badge-secondary";
+}// Resultado de validaci n de token
+public class TokenValidationResult
+{
+    public bool IsValid { get; set; }
+    public bool RateLimitExceeded { get; set; }
+    public int IdAPI { get; set; }
+    public int IdToken { get; set; }
+    public string? ErrorMessage { get; set; }
+    public int RemainingRequests { get; set; }
+    public DateTime? ResetTime { get; set; }
+}// Estad sticas de uso (ACTUALIZADAS)
+public class UsageStatistics
+{
+    public int IdAPI { get; set; }
+    public string NombreAPI { get; set; } = string.Empty;
+    public int TotalEjecuciones { get; set; }
+    public int EjecucionesExitosas { get; set; }
+    public int EjecucionesFallidas { get; set; }
+    public double TiempoPromedioMs { get; set; }
+    public DateTime? PrimeraEjecucion { get; set; }
+    public DateTime? UltimaEjecucion { get; set; }
+    public int CredencialesUnicas { get; set; }
+    public int IPsUnicas { get; set; }
+
+    // Propiedades calculadas
+    public double TasaExito => TotalEjecuciones > 0
+        ? (double)EjecucionesExitosas / TotalEjecuciones * 100
+        : 0;
+
+    public string TasaExitoTexto => $"{TasaExito:F1}%";
+    public string TiempoPromedioTexto => $"{TiempoPromedioMs:F1}ms";
+    public string PrimeraEjecucionTexto => PrimeraEjecucion?.ToString("dd/MM/yyyy") ?? "N/A";
+    public string UltimaEjecucionTexto => UltimaEjecucion?.ToString("dd/MM/yyyy HH:mm") ?? "N/A";
+}

@@ -1,0 +1,46 @@
+﻿public enum Ambiente
+{
+    TEST = 0,
+    PRODUCTION = 1
+}﻿public static class Environments
+{
+    public const string TEST = "TEST";
+    public const string PRODUCTION = "PRODUCTION";
+}﻿// Enums para tipos de objetos SQL
+public static class SqlObjectTypes
+{
+    public const string PROCEDURE = "PROCEDURE";
+    public const string FUNCTION = "FUNCTION";
+    public const string VIEW = "VIEW";
+}﻿// Enums para tipos de parámetros SQL
+public static class SqlParameterTypes
+{
+    public const string NVARCHAR = "NVARCHAR";
+    public const string INT = "INT";
+    public const string DECIMAL = "DECIMAL";
+    public const string DATETIME = "DATETIME";
+    public const string BIT = "BIT";
+}﻿public enum TipoAutenticacion
+{
+    NONE = 0,
+    TOKEN = 1,
+    APIKEY = 2,
+    JWT = 3,
+    OAUTH2 = 4,
+    NTLM = 5,
+    BASIC = 6
+}﻿public enum TipoObjeto
+{
+    PROCEDURE = 0,
+    FUNCTION = 1,
+    VIEW = 2
+}﻿public enum TipoParametro
+{
+    STRING = 0,
+    INT = 1,
+    DECIMAL = 2,
+    DATETIME = 3,
+    BOOLEAN = 4,
+    BIGINT = 5,
+    FLOAT = 6
+}

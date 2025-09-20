@@ -1,4 +1,5 @@
-// Request para ejecutar API
+
+// Request para ejecutar API (ACTUALIZADO)
 using System.ComponentModel.DataAnnotations;
 
 public class ApiExecutionRequest
@@ -10,4 +11,9 @@ public class ApiExecutionRequest
     public string Environment { get; set; } = "PRODUCTION";
 
     public Dictionary<string, object?> Parameters { get; set; } = new();
+
+    // NUEVOS CAMPOS PARA AUTENTICACIÓN
+    public string? AuthType { get; set; }
+    public string? Credential { get; set; }
+    public Dictionary<string, string> Headers { get; set; } = new();
 }

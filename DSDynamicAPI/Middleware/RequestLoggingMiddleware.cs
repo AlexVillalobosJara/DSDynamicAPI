@@ -1,7 +1,8 @@
-// Middleware para logging de requests
 using System.Diagnostics;
 
-// Middleware para logging de requests
+// =====================================================
+// RequestLoggingMiddleware - ACTUALIZADO
+// =====================================================
 public class RequestLoggingMiddleware
 {
     private readonly RequestDelegate _next;
@@ -42,8 +43,29 @@ public class RequestLoggingMiddleware
         {
             stopwatch.Stop();
 
-            _logger.LogInformation("Request completed: {RequestId} {StatusCode} in {ElapsedMs}ms",
-                requestId, context.Response.StatusCode, stopwatch.ElapsedMilliseconds);
+            // Log enriquecido con información de autenticación
+            var logMessage = "Request completed: {RequestId} {StatusCode} in {ElapsedMs}ms";
+            var logParams = new object[] { requestId, context.Response.StatusCode, stopwatch.ElapsedMilliseconds };
+
+            if (requestContext.IdAPI.HasValue)
+            {
+                logMessage += " - API: {IdAPI}";
+                logParams = logParams.Append(requestContext.IdAPI.Value).ToArray();
+
+                if (requestContext.IdCredencial.HasValue)
+                {
+                    logMessage += " - Credencial: {IdCredencial}";
+                    logParams = logParams.Append(requestContext.IdCredencial.Value).ToArray();
+                }
+
+                if (!string.IsNullOrEmpty(requestContext.TipoAuth))
+                {
+                    logMessage += " - Auth: {TipoAuth}";
+                    logParams = logParams.Append(requestContext.TipoAuth).ToArray();
+                }
+            }
+
+            _logger.LogInformation(logMessage, logParams);
         }
     }
 

@@ -1,4 +1,7 @@
-// Middleware para manejo global de excepciones
+// =====================================================
+// ExceptionHandlingMiddleware - ACTUALIZADO
+// =====================================================
+using Microsoft.Data.SqlClient;
 using System.Text.Json;
 
 public class ExceptionHandlingMiddleware
@@ -28,9 +31,26 @@ public class ExceptionHandlingMiddleware
 
     private async Task HandleExceptionAsync(HttpContext context, Exception exception)
     {
-        var requestId = context.Items["RequestContext"] is RequestContext ctx ? ctx.RequestId : Guid.NewGuid().ToString();
+        var requestContext = context.Items["RequestContext"] as RequestContext;
+        var requestId = requestContext?.RequestId ?? Guid.NewGuid().ToString();
 
-        _logger.LogError(exception, "Excepción no manejada en request {RequestId}: {Message}", requestId, exception.Message);
+        // Log con información de contexto de autenticación
+        var logMessage = "Excepción no manejada en request {RequestId}: {Message}";
+        var logParams = new object[] { requestId, exception.Message };
+
+        if (requestContext?.IdAPI.HasValue == true)
+        {
+            logMessage += " - API: {IdAPI}";
+            logParams = logParams.Append(requestContext.IdAPI.Value).ToArray();
+
+            if (!string.IsNullOrEmpty(requestContext.TipoAuth))
+            {
+                logMessage += " - Auth: {TipoAuth}";
+                logParams = logParams.Append(requestContext.TipoAuth).ToArray();
+            }
+        }
+
+        _logger.LogError(exception, logMessage, logParams);
 
         var statusCode = GetStatusCode(exception);
         var message = GetErrorMessage(exception);
@@ -43,7 +63,8 @@ public class ExceptionHandlingMiddleware
             Error = GetErrorType(exception),
             Message = message,
             StatusCode = statusCode,
-            RequestId = requestId
+            RequestId = requestId,
+            Timestamp = DateTime.UtcNow
         };
 
         // En desarrollo, incluir stack trace
@@ -69,6 +90,7 @@ public class ExceptionHandlingMiddleware
             UnauthorizedAccessException => 401,
             NotSupportedException => 501,
             TimeoutException => 408,
+            SqlException => 500,
             _ => 500
         };
     }
@@ -82,6 +104,7 @@ public class ExceptionHandlingMiddleware
             UnauthorizedAccessException => "Acceso no autorizado",
             NotSupportedException => "Operación no soportada",
             TimeoutException => "Timeout en la operación",
+            SqlException => "Error de base de datos",
             _ => _environment.IsDevelopment() ? exception.Message : "Error interno del servidor"
         };
     }
@@ -95,6 +118,7 @@ public class ExceptionHandlingMiddleware
             UnauthorizedAccessException => "UNAUTHORIZED",
             NotSupportedException => "NOT_SUPPORTED",
             TimeoutException => "TIMEOUT",
+            SqlException => "DATABASE_ERROR",
             _ => "INTERNAL_ERROR"
         };
     }

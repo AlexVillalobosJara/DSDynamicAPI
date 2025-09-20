@@ -1,4 +1,5 @@
-// Parámetros de API
+
+// Parámetros de API (ACTUALIZADO)
 public class ApiParameter
 {
     public string NombreParametro { get; set; } = string.Empty;

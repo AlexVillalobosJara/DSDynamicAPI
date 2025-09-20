@@ -1,0 +1,3480 @@
+﻿// =====================================================
+// AuditService - IMPLEMENTACIÓN CORREGIDA PARA DATABASESERVICE
+// =====================================================
+
+using DynamicAPIs.Services.Database;
+using Dapper;
+
+namespace DynamicAPIs.Services.Implementation;
+
+public class AuditService : IAuditService
+{
+    private readonly DatabaseService _dbService;
+    private readonly ILogger<AuditService> _logger;
+
+    public AuditService(DatabaseService dbService, ILogger<AuditService> logger)
+    {
+        _dbService = dbService;
+        _logger = logger;
+    }
+
+    // =====================================================
+    // MÉTODOS PRINCIPALES ACTUALIZADOS (IdToken → IdCredencial)
+    // =====================================================
+
+    public async Task<List<AuditLog>> GetAuditLogsAsync(int? idAPI = null, DateTime? fechaDesde = null, DateTime? fechaHasta = null, int pageSize = 50, int pageNumber = 1)
+    {
+        fechaDesde ??= DateTime.Now.AddDays(-30);
+        fechaHasta ??= DateTime.Now;
+
+        const string sql = @"
+            SELECT 
+                al.IdAPI, al.IdCredencial, al.Ambiente, al.ParametrosEnviados,
+                al.EsExitoso, al.MensajeError, al.TiempoEjecucionMs, al.DireccionIP, al.FechaEjecucion,
+                a.NombreAPI,
+                c.Nombre as NombreCredencial,
+                ta.Codigo as TipoAutenticacion
+            FROM AuditLogs al
+            INNER JOIN APIs a ON al.IdAPI = a.IdAPI
+            LEFT JOIN CredencialesAPI c ON al.IdCredencial = c.IdCredencial
+            LEFT JOIN TiposAutenticacion ta ON c.IdTipoAuth = ta.IdTipoAuth
+            WHERE (@IdAPI IS NULL OR al.IdAPI = @IdAPI)
+            AND al.FechaEjecucion BETWEEN @FechaDesde AND @FechaHasta
+            ORDER BY al.FechaEjecucion DESC
+            OFFSET @Offset ROWS FETCH NEXT @PageSize ROWS ONLY";
+
+        var offset = (pageNumber - 1) * pageSize;
+
+        var logs = await _dbService.QueryAsync<AuditLog>(sql, new
+        {
+            IdAPI = idAPI,
+            FechaDesde = fechaDesde,
+            FechaHasta = fechaHasta,
+            Offset = offset,
+            PageSize = pageSize
+        });
+
+        _logger.LogInformation("Obtenidos {Count} logs de auditoría para API {IdAPI}", logs.Count(), idAPI);
+        return logs.ToList();
+    }
+
+    public async Task<List<AuditLog>> GetRecentErrorsAsync(int count = 10)
+    {
+        const string sql = @"
+            SELECT TOP (@Count)
+                al.IdAPI, al.IdCredencial, al.Ambiente, al.ParametrosEnviados,
+                al.EsExitoso, al.MensajeError, al.TiempoEjecucionMs, al.DireccionIP, al.FechaEjecucion,
+                a.NombreAPI,
+                c.Nombre as NombreCredencial,
+                ta.Codigo as TipoAutenticacion
+            FROM AuditLogs al
+            INNER JOIN APIs a ON al.IdAPI = a.IdAPI
+            LEFT JOIN CredencialesAPI c ON al.IdCredencial = c.IdCredencial
+            LEFT JOIN TiposAutenticacion ta ON c.IdTipoAuth = ta.IdTipoAuth
+            WHERE al.EsExitoso = 0
+            ORDER BY al.FechaEjecucion DESC";
+
+        var errors = await _dbService.QueryAsync<AuditLog>(sql, new { Count = count });
+
+        _logger.LogInformation("Obtenidos {Count} errores recientes", errors.Count());
+        return errors.ToList();
+    }
+
+    public async Task<List<UsageStatistics>> GetUsageStatisticsAsync(int? idAPI = null, DateTime? fechaDesde = null, DateTime? fechaHasta = null)
+    {
+        fechaDesde ??= DateTime.Now.AddDays(-30);
+        fechaHasta ??= DateTime.Now;
+
+        const string sql = @"
+            SELECT 
+                a.IdAPI,
+                a.NombreAPI,
+                COUNT(*) as TotalEjecuciones,
+                SUM(CASE WHEN al.EsExitoso = 1 THEN 1 ELSE 0 END) as EjecucionesExitosas,
+                SUM(CASE WHEN al.EsExitoso = 0 THEN 1 ELSE 0 END) as EjecucionesFallidas,
+                AVG(CAST(al.TiempoEjecucionMs AS FLOAT)) as TiempoPromedioMs,
+                MIN(al.FechaEjecucion) as PrimeraEjecucion,
+                MAX(al.FechaEjecucion) as UltimaEjecucion,
+                COUNT(DISTINCT al.IdCredencial) as CredencialesUnicas,
+                COUNT(DISTINCT al.DireccionIP) as IPsUnicas
+            FROM APIs a
+            INNER JOIN AuditLogs al ON a.IdAPI = al.IdAPI
+            WHERE (@IdAPI IS NULL OR a.IdAPI = @IdAPI)
+            AND al.FechaEjecucion BETWEEN @FechaDesde AND @FechaHasta
+            GROUP BY a.IdAPI, a.NombreAPI
+            ORDER BY TotalEjecuciones DESC";
+
+        var stats = await _dbService.QueryAsync<UsageStatistics>(sql, new
+        {
+            IdAPI = idAPI,
+            FechaDesde = fechaDesde,
+            FechaHasta = fechaHasta
+        });
+
+        _logger.LogInformation("Obtenidas estadísticas de uso para {Count} APIs", stats.Count());
+        return stats.ToList();
+    }
+
+    // =====================================================
+    // MÉTODO PRINCIPAL DE LOGGING ACTUALIZADO
+    // =====================================================
+
+    public async Task LogAuditoriaAsync(int idAPI, int? idCredencial, string ambiente, string? parametrosEnviados, bool esExitoso, string? mensajeError, int tiempoEjecucionMs, string? direccionIP)
+    {
+        try
+        {
+            const string sql = @"
+                INSERT INTO AuditLogs (
+                    IdAPI, IdCredencial, Ambiente, ParametrosEnviados, 
+                    EsExitoso, MensajeError, TiempoEjecucionMs, DireccionIP
+                )
+                VALUES (
+                    @IdAPI, @IdCredencial, @Ambiente, @ParametrosEnviados,
+                    @EsExitoso, @MensajeError, @TiempoEjecucionMs, @DireccionIP
+                )";
+
+            await _dbService.ExecuteAsync(sql, new
+            {
+                IdAPI = idAPI,
+                IdCredencial = idCredencial,
+                Ambiente = ambiente,
+                ParametrosEnviados = parametrosEnviados,
+                EsExitoso = esExitoso,
+                MensajeError = mensajeError,
+                TiempoEjecucionMs = tiempoEjecucionMs,
+                DireccionIP = direccionIP
+            });
+
+            _logger.LogDebug("Log de auditoría registrado: API={IdAPI}, Credencial={IdCredencial}, Exitoso={EsExitoso}",
+                idAPI, idCredencial, esExitoso);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error registrando log de auditoría para API {IdAPI}", idAPI);
+            // No propagamos la excepción para evitar afectar el flujo principal
+        }
+    }
+
+    public async Task<long> GetTotalExecutionsAsync(DateTime? fechaDesde = null)
+    {
+        fechaDesde ??= DateTime.Now.AddDays(-30);
+
+        const string sql = @"
+            SELECT COUNT(*) 
+            FROM AuditLogs 
+            WHERE FechaEjecucion >= @FechaDesde";
+
+        // CORREGIDO: Usar método específico para long
+        var total = await _dbService.QueryFirstOrDefaultAsLongAsync(sql, new { FechaDesde = fechaDesde });
+
+        return total;
+    }
+
+    public async Task<double> GetAverageExecutionTimeAsync(int? idAPI = null, DateTime? fechaDesde = null)
+    {
+        fechaDesde ??= DateTime.Now.AddDays(-30);
+
+        const string sql = @"
+            SELECT AVG(CAST(TiempoEjecucionMs AS FLOAT))
+            FROM AuditLogs 
+            WHERE (@IdAPI IS NULL OR IdAPI = @IdAPI)
+            AND FechaEjecucion >= @FechaDesde
+            AND EsExitoso = 1";
+
+        // CORREGIDO: Usar método específico para double
+        var average = await _dbService.QueryFirstOrDefaultAsDoubleAsync(sql, new { IdAPI = idAPI, FechaDesde = fechaDesde });
+
+        return average;
+    }
+
+    public async Task<double> GetSuccessRateAsync(int? idAPI = null, DateTime? fechaDesde = null)
+    {
+        fechaDesde ??= DateTime.Now.AddDays(-30);
+
+        const string sql = @"
+            SELECT 
+                CASE 
+                    WHEN COUNT(*) = 0 THEN 0
+                    ELSE CAST(SUM(CASE WHEN EsExitoso = 1 THEN 1 ELSE 0 END) AS FLOAT) / COUNT(*) * 100
+                END as SuccessRate
+            FROM AuditLogs 
+            WHERE (@IdAPI IS NULL OR IdAPI = @IdAPI)
+            AND FechaEjecucion >= @FechaDesde";
+
+        // CORREGIDO: Usar método específico para double
+        var successRate = await _dbService.QueryFirstOrDefaultAsDoubleAsync(sql, new { IdAPI = idAPI, FechaDesde = fechaDesde });
+
+        return successRate;
+    }
+
+    // =====================================================
+    // NUEVOS MÉTODOS PARA ANÁLISIS POR TIPO DE AUTENTICACIÓN
+    // =====================================================
+
+    public async Task<List<AuditLog>> GetAuditLogsByAuthTypeAsync(TipoAutenticacion tipoAuth, DateTime? fechaDesde = null, DateTime? fechaHasta = null)
+    {
+        fechaDesde ??= DateTime.Now.AddDays(-30);
+        fechaHasta ??= DateTime.Now;
+
+        const string sql = @"
+            SELECT 
+                al.IdAPI, al.IdCredencial, al.Ambiente, al.ParametrosEnviados,
+                al.EsExitoso, al.MensajeError, al.TiempoEjecucionMs, al.DireccionIP, al.FechaEjecucion,
+                a.NombreAPI,
+                c.Nombre as NombreCredencial,
+                ta.Codigo as TipoAutenticacion
+            FROM AuditLogs al
+            INNER JOIN APIs a ON al.IdAPI = a.IdAPI
+            LEFT JOIN CredencialesAPI c ON al.IdCredencial = c.IdCredencial
+            LEFT JOIN TiposAutenticacion ta ON c.IdTipoAuth = ta.IdTipoAuth
+            WHERE ta.Codigo = @TipoAuth
+            AND al.FechaEjecucion BETWEEN @FechaDesde AND @FechaHasta
+            ORDER BY al.FechaEjecucion DESC";
+
+        var logs = await _dbService.QueryAsync<AuditLog>(sql, new
+        {
+            TipoAuth = tipoAuth.ToString(),
+            FechaDesde = fechaDesde,
+            FechaHasta = fechaHasta
+        });
+
+        _logger.LogInformation("Obtenidos {Count} logs de auditoría para tipo {TipoAuth}", logs.Count(), tipoAuth);
+        return logs.ToList();
+    }
+
+    public async Task<Dictionary<string, int>> GetExecutionsByAuthTypeAsync(DateTime? fechaDesde = null, DateTime? fechaHasta = null)
+    {
+        fechaDesde ??= DateTime.Now.AddDays(-30);
+        fechaHasta ??= DateTime.Now;
+
+        const string sql = @"
+            SELECT 
+                ISNULL(ta.Codigo, 'NONE') as TipoAuth,
+                COUNT(*) as Count
+            FROM AuditLogs al
+            INNER JOIN APIs a ON al.IdAPI = a.IdAPI
+            LEFT JOIN CredencialesAPI c ON al.IdCredencial = c.IdCredencial
+            LEFT JOIN TiposAutenticacion ta ON c.IdTipoAuth = ta.IdTipoAuth
+            WHERE al.FechaEjecucion BETWEEN @FechaDesde AND @FechaHasta
+            GROUP BY ta.Codigo
+            ORDER BY Count DESC";
+
+        var results = await _dbService.QueryAsync<dynamic>(sql, new
+        {
+            FechaDesde = fechaDesde,
+            FechaHasta = fechaHasta
+        });
+
+        var distribution = results.ToDictionary(r => (string)r.TipoAuth, r => (int)r.Count);
+
+        _logger.LogInformation("Obtenida distribución de ejecuciones por tipo de auth: {Count} tipos", distribution.Count);
+        return distribution;
+    }
+
+    public async Task<List<AuditLog>> GetAuditLogsByCredentialAsync(int idCredencial, DateTime? fechaDesde = null, DateTime? fechaHasta = null)
+    {
+        fechaDesde ??= DateTime.Now.AddDays(-30);
+        fechaHasta ??= DateTime.Now;
+
+        const string sql = @"
+            SELECT 
+                al.IdAPI, al.IdCredencial, al.Ambiente, al.ParametrosEnviados,
+                al.EsExitoso, al.MensajeError, al.TiempoEjecucionMs, al.DireccionIP, al.FechaEjecucion,
+                a.NombreAPI,
+                c.Nombre as NombreCredencial,
+                ta.Codigo as TipoAutenticacion
+            FROM AuditLogs al
+            INNER JOIN APIs a ON al.IdAPI = a.IdAPI
+            INNER JOIN CredencialesAPI c ON al.IdCredencial = c.IdCredencial
+            INNER JOIN TiposAutenticacion ta ON c.IdTipoAuth = ta.IdTipoAuth
+            WHERE al.IdCredencial = @IdCredencial
+            AND al.FechaEjecucion BETWEEN @FechaDesde AND @FechaHasta
+            ORDER BY al.FechaEjecucion DESC";
+
+        var logs = await _dbService.QueryAsync<AuditLog>(sql, new
+        {
+            IdCredencial = idCredencial,
+            FechaDesde = fechaDesde,
+            FechaHasta = fechaHasta
+        });
+
+        _logger.LogInformation("Obtenidos {Count} logs de auditoría para credencial {IdCredencial}", logs.Count(), idCredencial);
+        return logs.ToList();
+    }
+
+    public async Task<double> GetSuccessRateByAuthTypeAsync(TipoAutenticacion tipoAuth, DateTime? fechaDesde = null)
+    {
+        fechaDesde ??= DateTime.Now.AddDays(-30);
+
+        const string sql = @"
+            SELECT 
+                CASE 
+                    WHEN COUNT(*) = 0 THEN 0
+                    ELSE CAST(SUM(CASE WHEN al.EsExitoso = 1 THEN 1 ELSE 0 END) AS FLOAT) / COUNT(*) * 100
+                END as SuccessRate
+            FROM AuditLogs al
+            INNER JOIN CredencialesAPI c ON al.IdCredencial = c.IdCredencial
+            INNER JOIN TiposAutenticacion ta ON c.IdTipoAuth = ta.IdTipoAuth
+            WHERE ta.Codigo = @TipoAuth
+            AND al.FechaEjecucion >= @FechaDesde";
+
+        // CORREGIDO: Usar método específico para double
+        var successRate = await _dbService.QueryFirstOrDefaultAsDoubleAsync(sql, new
+        {
+            TipoAuth = tipoAuth.ToString(),
+            FechaDesde = fechaDesde
+        });
+
+        return successRate;
+    }
+
+    // =====================================================
+    // MÉTODOS DE LIMPIEZA Y MANTENIMIENTO
+    // =====================================================
+
+    public async Task<int> CleanupOldAuditLogsAsync(int daysToKeep = 90)
+    {
+        const string sql = @"
+            DELETE FROM AuditLogs 
+            WHERE FechaEjecucion < DATEADD(DAY, -@DaysToKeep, GETDATE())";
+
+        var deletedRows = await _dbService.ExecuteAsync(sql, new { DaysToKeep = daysToKeep });
+
+        _logger.LogInformation("Limpieza de logs de auditoría: {Count} registros eliminados", deletedRows);
+        return deletedRows;
+    }
+
+    // =====================================================
+    // MÉTODOS AUXILIARES PARA ESTADÍSTICAS AVANZADAS
+    // =====================================================
+
+    public async Task<List<CredentialUsageStatsDto>> GetCredentialUsageStatsAsync(int? idAPI = null, DateTime? fechaDesde = null, DateTime? fechaHasta = null)
+    {
+        fechaDesde ??= DateTime.Now.AddDays(-30);
+        fechaHasta ??= DateTime.Now;
+
+        const string sql = @"
+            SELECT 
+                c.IdCredencial,
+                c.Nombre as NombreCredencial,
+                c.IdAPI,
+                a.NombreAPI,
+                ta.Codigo as TipoAutenticacion,
+                COUNT(*) as TotalUsos,
+                SUM(CASE WHEN al.EsExitoso = 1 THEN 1 ELSE 0 END) as UsosExitosos,
+                SUM(CASE WHEN al.EsExitoso = 0 THEN 1 ELSE 0 END) as UsosFallidos,
+                AVG(CAST(al.TiempoEjecucionMs AS FLOAT)) as TiempoPromedioMs,
+                MIN(al.FechaEjecucion) as PrimerUso,
+                MAX(al.FechaEjecucion) as UltimoUso,
+                COUNT(DISTINCT al.DireccionIP) as IPsUnicas
+            FROM CredencialesAPI c
+            INNER JOIN APIs a ON c.IdAPI = a.IdAPI
+            INNER JOIN TiposAutenticacion ta ON c.IdTipoAuth = ta.IdTipoAuth
+            LEFT JOIN AuditLogs al ON c.IdCredencial = al.IdCredencial 
+                AND al.FechaEjecucion BETWEEN @FechaDesde AND @FechaHasta
+            WHERE c.EsActivo = 1
+            AND (@IdAPI IS NULL OR c.IdAPI = @IdAPI)
+            GROUP BY c.IdCredencial, c.Nombre, c.IdAPI, a.NombreAPI, ta.Codigo
+            HAVING COUNT(*) > 0
+            ORDER BY TotalUsos DESC";
+
+        var stats = await _dbService.QueryAsync<CredentialUsageStatsDto>(sql, new
+        {
+            IdAPI = idAPI,
+            FechaDesde = fechaDesde,
+            FechaHasta = fechaHasta
+        });
+
+        _logger.LogInformation("Obtenidas estadísticas de uso para {Count} credenciales", stats.Count());
+        return stats.ToList();
+    }
+
+    // =====================================================
+    // MÉTODO PARA VERIFICAR SALUD DEL SISTEMA
+    // =====================================================
+
+    public async Task<bool> IsSystemHealthyAsync()
+    {
+        try
+        {
+            // Verificar conectividad básica
+            await _dbService.TestConnectionAsync();
+
+            // Verificar que no hay errores críticos recientes
+            var recentErrors = await GetRecentErrorsAsync(5);
+            var errorRate = recentErrors.Count;
+
+            return errorRate < 3; // Menos de 3 errores recientes = saludable
+        }
+        catch
+        {
+            return false;
+        }
+    }
+}
+
+// =====================================================
+// DTOS AUXILIARES CORREGIDOS
+// =====================================================
+
+public class CredentialUsageStatsDto
+{
+    public int IdCredencial { get; set; }
+    public string NombreCredencial { get; set; } = string.Empty;
+    public int IdAPI { get; set; }
+    public string NombreAPI { get; set; } = string.Empty;
+    public string TipoAutenticacion { get; set; } = string.Empty;
+    public int TotalUsos { get; set; }
+    public int UsosExitosos { get; set; }
+    public int UsosFallidos { get; set; }
+    public double TiempoPromedioMs { get; set; }
+    public DateTime? PrimerUso { get; set; }
+    public DateTime? UltimoUso { get; set; }
+    public int IPsUnicas { get; set; }
+    public double TasaExito => TotalUsos > 0 ? (double)UsosExitosos / TotalUsos * 100 : 0;
+}﻿// =====================================================
+// AuthenticationService - IMPLEMENTACIÓN COMPLETA
+// =====================================================
+
+using System.IdentityModel.Tokens.Jwt;
+using System.Text;
+using System.Text.Json;
+using Microsoft.IdentityModel.Tokens;
+using System.Net.Http.Headers;
+using Dapper;
+using DynamicAPIs.Services.Database;
+
+namespace DynamicAPIs.Services.Implementation;
+
+public class AuthenticationService : IAuthenticationService
+{
+    private readonly DatabaseService _dbService;
+    private readonly ILogger<AuthenticationService> _logger;
+    private readonly IHttpClientFactory _httpClientFactory;
+    private readonly Dictionary<int, DateTime> _rateLimitCache = new();
+
+    public AuthenticationService(
+        DatabaseService dbService,
+        ILogger<AuthenticationService> logger,
+        IHttpClientFactory httpClientFactory)
+    {
+        _dbService = dbService;
+        _logger = logger;
+        _httpClientFactory = httpClientFactory;
+    }
+
+    // =====================================================
+    // VALIDACIÓN PRINCIPAL DE AUTENTICACIÓN
+    // =====================================================
+
+    public async Task<AuthValidationResult> AuthenticateAsync(CredentialValidationRequest request)
+    {
+        try
+        {
+            _logger.LogInformation("Iniciando autenticación para API {IdAPI} con tipo {TipoAuth}",
+                request.IdAPI, request.TipoAuth);
+
+            // Obtener configuración de la API
+            ApiConfiguration? apiConfig = await GetAPIConfigForAuthAsync(request.IdAPI);
+
+            if (apiConfig == null)
+            {
+                return new AuthValidationResult
+                {
+                    IsValid = false,
+                    ErrorMessage = "API no encontrada o inactiva",
+                    IdAPI = request.IdAPI
+                };
+            }
+
+            // Verificar que el tipo de auth coincida
+            if (apiConfig.TipoAutenticacion != request.TipoAuth.ToString())
+            {
+                return new AuthValidationResult
+                {
+                    IsValid = false,
+                    ErrorMessage = $"API configurada para {apiConfig.TipoAutenticacion}, recibido {request.TipoAuth}",
+                    IdAPI = request.IdAPI
+                };
+            }
+
+            // Delegar a método específico por tipo
+            return request.TipoAuth switch
+            {
+                TipoAutenticacion.NONE => await ValidateNoneAuthAsync(request.IdAPI),
+                TipoAutenticacion.TOKEN => await ValidateTokenAsync(request.Credential!, request.IdAPI),
+                TipoAutenticacion.APIKEY => await ValidateApiKeyAsync(request.Credential!, request.IdAPI),
+                TipoAutenticacion.JWT => await ValidateJWTAsync(request.Credential!, request.IdAPI),
+                TipoAutenticacion.OAUTH2 => await ValidateOAuth2TokenAsync(request.Credential!, request.IdAPI),
+                TipoAutenticacion.NTLM => await ValidateNTLMAsync(request.Credential!, request.IdAPI),
+                TipoAutenticacion.BASIC => await ValidateBasicAuthAsync(request.Credential!, request.IdAPI),
+                _ => new AuthValidationResult
+                {
+                    IsValid = false,
+                    ErrorMessage = "Tipo de autenticación no soportado",
+                    IdAPI = request.IdAPI
+                }
+            };
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error en autenticación para API {IdAPI}", request.IdAPI);
+            return new AuthValidationResult
+            {
+                IsValid = false,
+                ErrorMessage = "Error interno de autenticación",
+                IdAPI = request.IdAPI
+            };
+        }
+    }
+
+    // =====================================================
+    // VALIDACIÓN POR TIPO DE AUTENTICACIÓN
+    // =====================================================
+
+    public async Task<AuthValidationResult> ValidateTokenAsync(string token, int? idAPI = null)
+    {
+        const string sql = @"
+            SELECT c.IdCredencial, c.IdAPI, c.Nombre, c.UltimoUso, c.ContadorUsos,
+                   a.RateLimitPorMinuto, a.NombreAPI
+            FROM CredencialesAPI c
+            INNER JOIN APIs a ON c.IdAPI = a.IdAPI
+            INNER JOIN TiposAutenticacion ta ON c.IdTipoAuth = ta.IdTipoAuth
+            WHERE c.ValorCredencial = @Token 
+            AND ta.Codigo = 'TOKEN'
+            AND c.EsActivo = 1 
+            AND a.EsActivo = 1
+            AND (c.FechaExpiracion IS NULL OR c.FechaExpiracion > GETDATE())
+            AND (@IdAPI IS NULL OR c.IdAPI = @IdAPI)";
+
+        var credencial = await _dbService.QueryFirstOrDefaultAsync<dynamic>(sql, new { Token = token, IdAPI = idAPI });
+
+        if (credencial == null)
+        {
+            return new AuthValidationResult
+            {
+                IsValid = false,
+                ErrorMessage = "Token inválido o expirado",
+                IdAPI = idAPI ?? 0
+            };
+        }
+
+        // Verificar rate limit
+        var rateLimitExceeded = await CheckRateLimitAsync(credencial.IdCredencial, credencial.IdAPI);
+
+        var result = new AuthValidationResult
+        {
+            IsValid = true,
+            IdAPI = credencial.IdAPI,
+            IdCredencial = credencial.IdCredencial,
+            TipoAuth = "TOKEN",
+            RateLimitExceeded = rateLimitExceeded
+        };
+
+        if (!rateLimitExceeded)
+        {
+            await IncrementRateLimitAsync(credencial.IdCredencial);
+            await UpdateLastUsageAsync(credencial.IdCredencial);
+        }
+
+        return result;
+    }
+
+    public async Task<AuthValidationResult> ValidateApiKeyAsync(string apiKey, int? idAPI = null)
+    {
+        const string sql = @"
+            SELECT c.IdCredencial, c.IdAPI, c.Nombre, c.UltimoUso, c.ContadorUsos,
+                   a.RateLimitPorMinuto, a.NombreAPI
+            FROM CredencialesAPI c
+            INNER JOIN APIs a ON c.IdAPI = a.IdAPI
+            INNER JOIN TiposAutenticacion ta ON c.IdTipoAuth = ta.IdTipoAuth
+            WHERE c.ValorCredencial = @ApiKey 
+            AND ta.Codigo = 'APIKEY'
+            AND c.EsActivo = 1 
+            AND a.EsActivo = 1
+            AND (c.FechaExpiracion IS NULL OR c.FechaExpiracion > GETDATE())
+            AND (@IdAPI IS NULL OR c.IdAPI = @IdAPI)";
+
+        var credencial = await _dbService.QueryFirstOrDefaultAsync<dynamic>(sql, new { ApiKey = apiKey, IdAPI = idAPI });
+
+        if (credencial == null)
+        {
+            return new AuthValidationResult
+            {
+                IsValid = false,
+                ErrorMessage = "API Key inválida o expirada",
+                IdAPI = idAPI ?? 0
+            };
+        }
+
+        var rateLimitExceeded = await CheckRateLimitAsync(credencial.IdCredencial, credencial.IdAPI);
+
+        var result = new AuthValidationResult
+        {
+            IsValid = true,
+            IdAPI = credencial.IdAPI,
+            IdCredencial = credencial.IdCredencial,
+            TipoAuth = "APIKEY",
+            RateLimitExceeded = rateLimitExceeded
+        };
+
+        if (!rateLimitExceeded)
+        {
+            await IncrementRateLimitAsync(credencial.IdCredencial);
+            await UpdateLastUsageAsync(credencial.IdCredencial);
+        }
+
+        return result;
+    }
+
+    public async Task<AuthValidationResult> ValidateJWTAsync(string jwt, int idAPI)
+    {
+        var result = new AuthValidationResult { IdAPI = idAPI, TipoAuth = "JWT" };
+
+        try
+        {
+            // Obtener configuración JWT de la API
+            var apiConfig = await GetAPIConfigForAuthAsync(idAPI);
+            if (apiConfig?.TipoAutenticacion != "JWT")
+            {
+                result.ErrorMessage = "API no configurada para JWT";
+                return result;
+            }
+
+            var jwtConfig = apiConfig.GetConfiguracionAuth<JWTConfiguration>();
+            if (jwtConfig == null)
+            {
+                result.ErrorMessage = "Configuración JWT no válida";
+                return result;
+            }
+
+            // Validar JWT
+            var tokenHandler = new JwtSecurityTokenHandler();
+            var key = Encoding.UTF8.GetBytes(jwtConfig.SecretKey);
+
+            var validationParameters = new TokenValidationParameters
+            {
+                ValidateIssuerSigningKey = jwtConfig.ValidateIssuerSigningKey,
+                IssuerSigningKey = new SymmetricSecurityKey(key),
+                ValidateIssuer = jwtConfig.ValidateIssuer,
+                ValidIssuer = jwtConfig.ValidateIssuer ? jwtConfig.Issuer : null,
+                ValidateAudience = jwtConfig.ValidateAudience,
+                ValidAudience = jwtConfig.ValidateAudience ? jwtConfig.Audience : null,
+                ValidateLifetime = jwtConfig.ValidateLifetime,
+                ClockSkew = TimeSpan.FromSeconds(jwtConfig.ClockSkewSeconds)
+            };
+
+            var principal = tokenHandler.ValidateToken(jwt, validationParameters, out SecurityToken validatedToken);
+
+            result.IsValid = true;
+            result.AuthMetadata = new Dictionary<string, object>
+            {
+                ["Claims"] = principal.Claims.ToDictionary(c => c.Type, c => c.Value),
+                ["Issuer"] = validatedToken.Issuer,
+                ["ValidTo"] = validatedToken.ValidTo
+            };
+
+            _logger.LogInformation("JWT validado exitosamente para API {IdAPI}", idAPI);
+        }
+        catch (SecurityTokenException ex)
+        {
+            result.ErrorMessage = $"JWT inválido: {ex.Message}";
+            _logger.LogWarning("JWT inválido para API {IdAPI}: {Error}", idAPI, ex.Message);
+        }
+        catch (Exception ex)
+        {
+            result.ErrorMessage = "Error validando JWT";
+            _logger.LogError(ex, "Error validando JWT para API {IdAPI}", idAPI);
+        }
+
+        return result;
+    }
+
+    public async Task<AuthValidationResult> ValidateOAuth2TokenAsync(string token, int idAPI)
+    {
+        var result = new AuthValidationResult { IdAPI = idAPI, TipoAuth = "OAUTH2" };
+
+        try
+        {
+            var apiConfig = await GetAPIConfigForAuthAsync(idAPI);
+            if (apiConfig?.TipoAutenticacion != "OAUTH2")
+            {
+                result.ErrorMessage = "API no configurada para OAuth2";
+                return result;
+            }
+
+            var oauth2Config = apiConfig.GetConfiguracionAuth<OAuth2Configuration>();
+            if (oauth2Config == null)
+            {
+                result.ErrorMessage = "Configuración OAuth2 no válida";
+                return result;
+            }
+
+            // Validar token via introspection endpoint
+            using var client = _httpClientFactory.CreateClient();
+
+            var authValue = Convert.ToBase64String(Encoding.UTF8.GetBytes($"{oauth2Config.ClientId}:{oauth2Config.ClientSecret}"));
+            client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Basic", authValue);
+
+            var introspectData = new FormUrlEncodedContent(new[]
+            {
+                new KeyValuePair<string, string>("token", token),
+                new KeyValuePair<string, string>("token_type_hint", "access_token")
+            });
+
+            var response = await client.PostAsync(oauth2Config.IntrospectionEndpoint, introspectData);
+
+            if (response.IsSuccessStatusCode)
+            {
+                var content = await response.Content.ReadAsStringAsync();
+                var introspectionResult = JsonSerializer.Deserialize<JsonElement>(content);
+
+                if (introspectionResult.TryGetProperty("active", out var activeProperty) && activeProperty.GetBoolean())
+                {
+                    result.IsValid = true;
+                    result.AuthMetadata = new Dictionary<string, object>
+                    {
+                        ["TokenInfo"] = content,
+                        ["ValidatedAt"] = DateTime.UtcNow
+                    };
+
+                    // Verificar scopes requeridos si están configurados
+                    if (oauth2Config.RequiredScopes?.Any() == true)
+                    {
+                        if (introspectionResult.TryGetProperty("scope", out var scopeProperty))
+                        {
+                            var tokenScopes = scopeProperty.GetString()?.Split(' ') ?? Array.Empty<string>();
+                            var hasRequiredScopes = oauth2Config.RequiredScopes.All(rs => tokenScopes.Contains(rs));
+
+                            if (!hasRequiredScopes)
+                            {
+                                result.IsValid = false;
+                                result.ErrorMessage = "Token no tiene los scopes requeridos";
+                            }
+                        }
+                        else
+                        {
+                            result.IsValid = false;
+                            result.ErrorMessage = "Token no contiene información de scopes";
+                        }
+                    }
+                }
+                else
+                {
+                    result.ErrorMessage = "Token OAuth2 inactivo";
+                }
+            }
+            else
+            {
+                result.ErrorMessage = "Error validando token OAuth2";
+            }
+        }
+        catch (Exception ex)
+        {
+            result.ErrorMessage = "Error validando OAuth2";
+            _logger.LogError(ex, "Error validando OAuth2 para API {IdAPI}", idAPI);
+        }
+
+        return result;
+    }
+
+    public async Task<AuthValidationResult> ValidateNTLMAsync(string credentials, int idAPI)
+    {
+        var result = new AuthValidationResult { IdAPI = idAPI, TipoAuth = "NTLM" };
+
+        try
+        {
+            // NOTA: Implementación simplificada - en producción se requeriría
+            // integración completa con Active Directory
+            var apiConfig = await GetAPIConfigForAuthAsync(idAPI);
+            if (apiConfig?.TipoAutenticacion != "NTLM")
+            {
+                result.ErrorMessage = "API no configurada para NTLM";
+                return result;
+            }
+
+            var ntlmConfig = apiConfig.GetConfiguracionAuth<NTLMConfiguration>();
+            if (ntlmConfig == null)
+            {
+                result.ErrorMessage = "Configuración NTLM no válida";
+                return result;
+            }
+
+            // Aquí iría la validación real con Windows Authentication/Active Directory
+            // Por ahora, implementación placeholder
+            result.IsValid = ntlmConfig.RequireAuthentication;
+            result.ErrorMessage = result.IsValid ? null : "Autenticación NTLM requerida";
+
+            _logger.LogWarning("Validación NTLM usando implementación placeholder para API {IdAPI}", idAPI);
+        }
+        catch (Exception ex)
+        {
+            result.ErrorMessage = "Error validando NTLM";
+            _logger.LogError(ex, "Error validando NTLM para API {IdAPI}", idAPI);
+        }
+
+        return result;
+    }
+
+    public async Task<AuthValidationResult> ValidateBasicAuthAsync(string credentials, int idAPI)
+    {
+        var result = new AuthValidationResult { IdAPI = idAPI, TipoAuth = "BASIC" };
+
+        try
+        {
+            var apiConfig = await GetAPIConfigForAuthAsync(idAPI);
+            if (apiConfig?.TipoAutenticacion != "BASIC")
+            {
+                result.ErrorMessage = "API no configurada para Basic Auth";
+                return result;
+            }
+
+            var basicConfig = apiConfig.GetConfiguracionAuth<BasicAuthConfiguration>();
+            if (basicConfig == null)
+            {
+                result.ErrorMessage = "Configuración Basic Auth no válida";
+                return result;
+            }
+
+            // Decodificar credenciales Basic Auth
+            var decodedCredentials = DecodeBasicAuthCredentials(credentials);
+            if (decodedCredentials == null)
+            {
+                result.ErrorMessage = "Credenciales Basic Auth mal formadas";
+                return result;
+            }
+
+            // Buscar usuario en configuración
+            var user = basicConfig.Users?.FirstOrDefault(u =>
+                u.Username == decodedCredentials.Value.Username && u.IsActive);
+
+            if (user == null)
+            {
+                result.ErrorMessage = "Usuario no encontrado o inactivo";
+                return result;
+            }
+
+            // Verificar contraseña
+            var passwordValid = VerifyPassword(decodedCredentials.Value.Password, user.PasswordHash);
+
+            result.IsValid = passwordValid;
+            if (!passwordValid)
+            {
+                result.ErrorMessage = "Contraseña incorrecta";
+            }
+            else
+            {
+                result.AuthMetadata = new Dictionary<string, object>
+                {
+                    ["Username"] = user.Username,
+                    ["Roles"] = user.Roles ?? new List<string>(),
+                    ["ValidatedAt"] = DateTime.UtcNow
+                };
+            }
+        }
+        catch (Exception ex)
+        {
+            result.ErrorMessage = "Error validando Basic Auth";
+            _logger.LogError(ex, "Error validando Basic Auth para API {IdAPI}", idAPI);
+        }
+
+        return result;
+    }
+
+    private async Task<AuthValidationResult> ValidateNoneAuthAsync(int idAPI)
+    {
+        // Para APIs públicas (sin autenticación)
+        var isPublic = await IsAPIPublicAsync(idAPI);
+
+        return new AuthValidationResult
+        {
+            IsValid = isPublic,
+            IdAPI = idAPI,
+            TipoAuth = "NONE",
+            ErrorMessage = isPublic ? null : "API requiere autenticación"
+        };
+    }
+
+    // =====================================================
+    // RATE LIMITING
+    // =====================================================
+
+    public async Task<bool> CheckRateLimitAsync(int idCredencial, int idAPI)
+    {
+        const string sql = @"
+            SELECT COUNT(*) 
+            FROM AuditLogs al
+            INNER JOIN APIs a ON al.IdAPI = a.IdAPI
+            WHERE al.IdCredencial = @IdCredencial 
+            AND al.FechaEjecucion >= DATEADD(MINUTE, -1, GETDATE())
+            AND a.IdAPI = @IdAPI";
+
+        var currentCount = await _dbService.QueryFirstOrDefaultAsync<int>(sql, new { IdCredencial = idCredencial, IdAPI = idAPI });
+
+        const string rateLimitSql = "SELECT RateLimitPorMinuto FROM APIs WHERE IdAPI = @IdAPI";
+        var rateLimit = await _dbService.QueryFirstOrDefaultAsync<int>(rateLimitSql, new { IdAPI = idAPI });
+
+        return currentCount >= rateLimit;
+    }
+
+    public async Task<bool> IncrementRateLimitAsync(int idCredencial)
+    {
+        // Incrementar contador de uso en memoria para rate limiting inmediato
+        var key = idCredencial;
+        if (!_rateLimitCache.ContainsKey(key))
+        {
+            _rateLimitCache[key] = DateTime.UtcNow;
+        }
+
+        return true;
+    }
+
+    public async Task<Dictionary<int, int>> GetCurrentRateLimitsAsync(List<int> credencialIds)
+    {
+        if (!credencialIds.Any()) return new Dictionary<int, int>();
+
+        const string sql = @"
+            SELECT 
+                al.IdCredencial,
+                COUNT(*) as CurrentCount
+            FROM AuditLogs al
+            WHERE al.IdCredencial IN @CredencialIds
+            AND al.FechaEjecucion >= DATEADD(MINUTE, -1, GETDATE())
+            GROUP BY al.IdCredencial";
+
+        var results = await _dbService.QueryAsync<dynamic>(sql, new { CredencialIds = credencialIds });
+
+        return results.ToDictionary(r => (int)r.IdCredencial, r => (int)r.CurrentCount);
+    }
+
+    // =====================================================
+    // CONFIGURACIÓN Y METADATOS
+    // =====================================================
+
+    public async Task<ApiConfiguration?> GetAPIConfigForAuthAsync(int idAPI)
+    {
+        const string sql = @"
+            SELECT 
+                a.IdAPI, a.NombreAPI, a.Descripcion, a.ObjetoSQL, a.TipoObjeto,
+                a.EsActivo, a.RateLimitPorMinuto, a.ConfiguracionAuth,
+                ta.Codigo as TipoAutenticacion, ta.Nombre as NombreTipoAuth,
+                ta.RequiereConfiguracion
+            FROM APIs a
+            INNER JOIN TiposAutenticacion ta ON a.IdTipoAuth = ta.IdTipoAuth
+            WHERE a.IdAPI = @IdAPI AND a.EsActivo = 1";
+
+        return await _dbService.QueryFirstOrDefaultAsync<ApiConfiguration>(sql, new { IdAPI = idAPI });
+    }
+
+    public async Task<bool> IsAPIPublicAsync(int idAPI)
+    {
+        const string sql = @"
+            SELECT CASE WHEN ta.Codigo = 'NONE' THEN 1 ELSE 0 END
+            FROM APIs a
+            INNER JOIN TiposAutenticacion ta ON a.IdTipoAuth = ta.IdTipoAuth
+            WHERE a.IdAPI = @IdAPI AND a.EsActivo = 1";
+
+        return await _dbService.QueryFirstOrDefaultAsync<bool>(sql, new { IdAPI = idAPI });
+    }
+
+    public async Task<string> GetRequiredAuthTypeAsync(int idAPI)
+    {
+        const string sql = @"
+            SELECT ta.Codigo
+            FROM APIs a
+            INNER JOIN TiposAutenticacion ta ON a.IdTipoAuth = ta.IdTipoAuth
+            WHERE a.IdAPI = @IdAPI AND a.EsActivo = 1";
+
+        return await _dbService.QueryFirstOrDefaultAsync<string>(sql, new { IdAPI = idAPI }) ?? "UNKNOWN";
+    }
+
+    // =====================================================
+    // AUDITORÍA
+    // =====================================================
+
+    public async Task LogAuthenticationAttemptAsync(int idAPI, int? idCredencial, bool isSuccessful, string? errorMessage, string? ipAddress)
+    {
+        const string sql = @"
+            INSERT INTO AuditLogs (IdAPI, IdCredencial, Ambiente, EsExitoso, MensajeError, TiempoEjecucionMs, DireccionIP)
+            VALUES (@IdAPI, @IdCredencial, 'AUTH', @EsExitoso, @MensajeError, 0, @DireccionIP)";
+
+        await _dbService.ExecuteAsync(sql, new
+        {
+            IdAPI = idAPI,
+            IdCredencial = idCredencial,
+            EsExitoso = isSuccessful,
+            MensajeError = errorMessage,
+            DireccionIP = ipAddress
+        });
+    }
+
+    public async Task<List<AuditLog>> GetFailedAuthAttemptsAsync(DateTime? fechaDesde = null, int count = 100)
+    {
+        fechaDesde ??= DateTime.Now.AddDays(-7);
+
+        const string sql = @"
+            SELECT TOP (@Count)
+                al.IdAPI, al.IdCredencial, al.FechaEjecucion, al.MensajeError, al.DireccionIP,
+                a.NombreAPI, c.Nombre as NombreCredencial
+            FROM AuditLogs al
+            INNER JOIN APIs a ON al.IdAPI = a.IdAPI
+            LEFT JOIN CredencialesAPI c ON al.IdCredencial = c.IdCredencial
+            WHERE al.EsExitoso = 0 
+            AND al.Ambiente = 'AUTH'
+            AND al.FechaEjecucion >= @FechaDesde
+            ORDER BY al.FechaEjecucion DESC";
+
+        return await _dbService.QueryAsync<AuditLog>(sql, new { Count = count, FechaDesde = fechaDesde });
+    }
+
+    // =====================================================
+    // ESTADÍSTICAS Y MONITOREO
+    // =====================================================
+
+    public async Task<AuthStatsDto> GetAuthStatsAsync(int idAPI)
+    {
+        const string sql = @"
+            SELECT 
+                a.IdAPI, a.NombreAPI, ta.Codigo as TipoAuth,
+                COUNT(c.IdCredencial) as TotalCredenciales,
+                SUM(CASE WHEN c.EsActivo = 1 AND (c.FechaExpiracion IS NULL OR c.FechaExpiracion > GETDATE()) THEN 1 ELSE 0 END) as CredencialesActivas,
+                SUM(CASE WHEN c.FechaExpiracion IS NOT NULL AND c.FechaExpiracion <= GETDATE() THEN 1 ELSE 0 END) as CredencialesExpiradas
+            FROM APIs a
+            INNER JOIN TiposAutenticacion ta ON a.IdTipoAuth = ta.IdTipoAuth
+            LEFT JOIN CredencialesAPI c ON a.IdAPI = c.IdAPI
+            WHERE a.IdAPI = @IdAPI
+            GROUP BY a.IdAPI, a.NombreAPI, ta.Codigo";
+
+        var stats = await _dbService.QueryFirstOrDefaultAsync<AuthStatsDto>(sql, new { IdAPI = idAPI });
+
+        if (stats != null)
+        {
+            // Obtener estadísticas de autenticación de hoy
+            const string authSql = @"
+                SELECT 
+                    COUNT(*) as AuthenticationsToday,
+                    SUM(CASE WHEN EsExitoso = 0 THEN 1 ELSE 0 END) as FailedAuthsToday,
+                    MAX(FechaEjecucion) as LastAuthentication
+                FROM AuditLogs 
+                WHERE IdAPI = @IdAPI 
+                AND Ambiente = 'AUTH'
+                AND FechaEjecucion >= CAST(GETDATE() AS DATE)";
+
+            var authStats = await _dbService.QueryFirstOrDefaultAsync<dynamic>(authSql, new { IdAPI = idAPI });
+
+            if (authStats != null)
+            {
+                stats.AuthenticationsToday = authStats.AuthenticationsToday ?? 0;
+                stats.FailedAuthsToday = authStats.FailedAuthsToday ?? 0;
+                stats.LastAuthentication = authStats.LastAuthentication;
+                stats.SuccessRate = stats.AuthenticationsToday > 0
+                    ? (double)(stats.AuthenticationsToday - stats.FailedAuthsToday) / stats.AuthenticationsToday * 100
+                    : 0;
+            }
+        }
+
+        return stats ?? new AuthStatsDto { IdAPI = idAPI, NombreAPI = "API no encontrada" };
+    }
+
+    public async Task<List<ActivityDto>> GetRecentActivityAsync(int idAPI, int count = 10)
+    {
+        const string sql = @"
+            SELECT TOP (@Count)
+                al.FechaEjecucion as Timestamp,
+                CASE 
+                    WHEN al.EsExitoso = 1 THEN 'AUTH_SUCCESS'
+                    ELSE 'AUTH_FAILED'
+                END as EventType,
+                al.IdAPI,
+                al.IdCredencial,
+                CONCAT('Autenticación ', CASE WHEN al.EsExitoso = 1 THEN 'exitosa' ELSE 'fallida' END, 
+                       CASE WHEN c.Nombre IS NOT NULL THEN CONCAT(' - ', c.Nombre) ELSE '' END) as Description,
+                al.DireccionIP as IPAddress
+            FROM AuditLogs al
+            LEFT JOIN CredencialesAPI c ON al.IdCredencial = c.IdCredencial
+            WHERE al.IdAPI = @IdAPI AND al.Ambiente = 'AUTH'
+            ORDER BY al.FechaEjecucion DESC";
+
+        return await _dbService.QueryAsync<ActivityDto>(sql, new { Count = count, IdAPI = idAPI });
+    }
+
+    public async Task<SystemAuthHealthDto> GetSystemAuthHealthAsync()
+    {
+        const string sql = @"
+            SELECT 
+                COUNT(DISTINCT a.IdAPI) as TotalAPIs,
+                SUM(CASE WHEN ta.Codigo != 'NONE' THEN 1 ELSE 0 END) as APIsWithAuth,
+                COUNT(c.IdCredencial) as TotalCredentials,
+                SUM(CASE WHEN c.EsActivo = 1 AND (c.FechaExpiracion IS NULL OR c.FechaExpiracion > GETDATE()) THEN 1 ELSE 0 END) as ActiveCredentials,
+                SUM(CASE WHEN c.FechaExpiracion IS NOT NULL AND c.FechaExpiracion <= GETDATE() THEN 1 ELSE 0 END) as ExpiredCredentials,
+                SUM(CASE WHEN c.FechaExpiracion IS NOT NULL AND c.FechaExpiracion <= DATEADD(DAY, 7, GETDATE()) AND c.FechaExpiracion > GETDATE() THEN 1 ELSE 0 END) as CredentialsExpiringSoon
+            FROM APIs a
+            INNER JOIN TiposAutenticacion ta ON a.IdTipoAuth = ta.IdTipoAuth
+            LEFT JOIN CredencialesAPI c ON a.IdAPI = c.IdAPI
+            WHERE a.EsActivo = 1";
+
+        var health = await _dbService.QueryFirstOrDefaultAsync<SystemAuthHealthDto>(sql);
+
+        if (health != null)
+        {
+            // Obtener distribución por tipo de auth
+            const string distSql = @"
+                SELECT ta.Codigo, COUNT(a.IdAPI) as Count
+                FROM APIs a
+                INNER JOIN TiposAutenticacion ta ON a.IdTipoAuth = ta.IdTipoAuth
+                WHERE a.EsActivo = 1
+                GROUP BY ta.Codigo";
+
+            var distribution = await _dbService.QueryAsync<dynamic>(distSql);
+            health.AuthTypeDistribution = distribution.ToDictionary(
+                d => Enum.Parse<TipoAutenticacion>(d.Codigo),
+                d => (int)d.Count);
+
+            // Evaluar salud general
+            health.IsHealthy = health.ExpiredCredentials == 0 && health.CredentialsExpiringSoon < 5;
+
+            if (health.ExpiredCredentials > 0)
+                health.Warnings.Add($"{health.ExpiredCredentials} credenciales expiradas requieren limpieza");
+
+            if (health.CredentialsExpiringSoon > 0)
+                health.Warnings.Add($"{health.CredentialsExpiringSoon} credenciales expiran pronto");
+        }
+
+        return health ?? new SystemAuthHealthDto();
+    }
+
+    // =====================================================
+    // MÉTODOS AUXILIARES
+    // =====================================================
+
+    private async Task UpdateLastUsageAsync(int idCredencial)
+    {
+        const string sql = @"
+            UPDATE CredencialesAPI 
+            SET UltimoUso = GETDATE(), ContadorUsos = ISNULL(ContadorUsos, 0) + 1
+            WHERE IdCredencial = @IdCredencial";
+
+        await _dbService.ExecuteAsync(sql, new { IdCredencial = idCredencial });
+    }
+
+    private (string Username, string Password)? DecodeBasicAuthCredentials(string credentials)
+    {
+        try
+        {
+            // Remover prefijo "Basic " si existe
+            if (credentials.StartsWith("Basic ", StringComparison.OrdinalIgnoreCase))
+            {
+                credentials = credentials["Basic ".Length..];
+            }
+
+            var decodedBytes = Convert.FromBase64String(credentials);
+            var decodedString = Encoding.UTF8.GetString(decodedBytes);
+            var colonIndex = decodedString.IndexOf(':');
+
+            if (colonIndex == -1) return null;
+
+            return (decodedString[..colonIndex], decodedString[(colonIndex + 1)..]);
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private bool VerifyPassword(string password, string hash)
+    {
+        // NOTA: En producción, usar BCrypt o similar para verificar hashes
+        // Esta es una implementación simple para demostración
+        return password == hash; // CAMBIAR POR VERIFICACIÓN SEGURA
+    }
+}// =====================================================
+// ConfigurationService - IMPLEMENTACI N ACTUALIZADA
+// =====================================================
+
+using Dapper;
+using DSDynamicAPI.Services;
+using DynamicAPIs.Services.Database;
+using Microsoft.Extensions.Options;
+using System.Data;
+
+namespace DynamicAPIs.Services.Implementation;
+
+public class ConfigurationService : IConfigurationService
+{
+    private readonly DatabaseService _dbService;
+    private readonly DatabaseOptions _dbOptions;
+    private readonly ILogger<ConfigurationService> _logger;
+
+    public ConfigurationService(
+        DatabaseService dbService,
+        IOptions<DatabaseOptions> dbOptions,
+        ILogger<ConfigurationService> logger)
+    {
+        _dbService = dbService;
+        _dbOptions = dbOptions.Value;
+        _logger = logger;
+    }
+
+    // =====================================================
+    // M TODOS PRINCIPALES
+    // =====================================================
+
+    public async Task<ApiConfiguration?> GetApiConfigurationAsync(int idApi, string? credential = null)
+    {
+        try
+        {
+            _logger.LogInformation("Obteniendo configuraci n para API {IdAPI} con credencial proporcionada: {HasCredential}",
+                idApi, !string.IsNullOrEmpty(credential));
+
+            // Usar stored procedure actualizado
+            var parameters = new DynamicParameters();
+            parameters.Add("@IdAPI", idApi);
+            parameters.Add("@ValorCredencial", credential);
+
+            using var connection = await _dbService.GetConnectionAsync();
+
+            // Ejecutar SP que valida credencial y retorna configuraci n
+            var results = await connection.QueryMultipleAsync(
+                "sp_GetAPIConfigV2",
+                parameters,
+                commandType: CommandType.StoredProcedure,
+                commandTimeout: _dbOptions.DefaultCommandTimeout);
+
+            // Primera consulta: configuraci n de la API
+            var apiConfig = await results.ReadFirstOrDefaultAsync<ApiConfiguration>();
+            if (apiConfig == null)
+            {
+                _logger.LogWarning("API {IdAPI} no encontrada o credencial inv lida", idApi);
+                return null;
+            }
+
+            // Segunda consulta: par metros
+            var parametros = (await results.ReadAsync<ApiParameter>()).ToList();
+            apiConfig.Parametros = parametros;
+
+            _logger.LogInformation("Configuraci n obtenida exitosamente para API {IdAPI}: {NombreAPI}",
+                idApi, apiConfig.NombreAPI);
+
+            return apiConfig;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error obteniendo configuraci n para API {IdAPI}", idApi);
+            throw;
+        }
+    }
+
+    public async Task<List<ApiInfo>> GetAvailableApisAsync()
+    {
+        try
+        {
+            const string sql = @"
+                SELECT 
+                    a.IdAPI,
+                    a.NombreAPI,
+                    a.Descripcion,
+                    a.TipoObjeto,
+                    ta.Codigo as TipoAutenticacion,
+                    ta.Nombre as NombreTipoAuth,
+                    ta.RequiereConfiguracion
+                FROM APIs a
+                INNER JOIN TiposAutenticacion ta ON a.IdTipoAuth = ta.IdTipoAuth
+                WHERE a.EsActivo = 1
+                ORDER BY a.NombreAPI";
+
+            var apis = await _dbService.QueryAsync<dynamic>(sql);
+
+            var result = new List<ApiInfo>();
+
+            foreach (var api in apis)
+            {
+                // Obtener par metros para cada API
+                const string paramSql = @"
+                    SELECT NombreParametro, TipoParametro, EsObligatorio, ValorPorDefecto, Descripcion
+                    FROM Parametros 
+                    WHERE IdAPI = @IdAPI 
+                    ORDER BY Orden";
+
+                var parametros = await _dbService.QueryAsync<ParameterInfo>(paramSql, new { IdAPI = api.IdAPI });
+
+                var apiInfo = new ApiInfo
+                {
+                    IdAPI = api.IdAPI,
+                    NombreAPI = api.NombreAPI,
+                    Descripcion = api.Descripcion ?? string.Empty,
+                    TipoObjeto = api.TipoObjeto,
+                    Parametros = parametros.ToList(),
+                    Endpoint = $"/api/execute?idApi={api.IdAPI}",
+                    ExampleCall = GenerateExampleCall(api.IdAPI, parametros.ToList())
+                };
+
+                result.Add(apiInfo);
+            }
+
+            _logger.LogInformation("Obtenidas {Count} APIs disponibles", result.Count);
+            return result;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error obteniendo APIs disponibles");
+            throw;
+        }
+    }
+
+    // =====================================================
+    // NUEVOS M TODOS PARA SISTEMA MULTI-AUTH
+    // =====================================================
+
+    public async Task<ApiConfiguration?> GetApiConfigurationWithAuthAsync(int idApi, TipoAutenticacion tipoAuth, string? credential = null)
+    {
+        try
+        {
+            // Verificar que la API est  configurada para el tipo de auth especificado
+            const string authCheckSql = @"
+                SELECT ta.Codigo
+                FROM APIs a
+                INNER JOIN TiposAutenticacion ta ON a.IdTipoAuth = ta.IdTipoAuth
+                WHERE a.IdAPI = @IdAPI AND a.EsActivo = 1";
+
+            var configuredAuthType = await _dbService.QueryFirstOrDefaultAsync<string>(authCheckSql, new { IdAPI = idApi });
+
+            if (configuredAuthType != tipoAuth.ToString())
+            {
+                _logger.LogWarning("API {IdAPI} configurada para {ConfiguredAuth}, solicitado {RequestedAuth}",
+                    idApi, configuredAuthType, tipoAuth);
+                return null;
+            }
+
+            // Si el tipo coincide, obtener configuraci n normal
+            return await GetApiConfigurationAsync(idApi, credential);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error obteniendo configuraci n con auth espec fico para API {IdAPI}", idApi);
+            throw;
+        }
+    }
+
+    public async Task<List<TipoAutenticacionDto>> GetSupportedAuthTypesAsync()
+    {
+        try
+        {
+            const string sql = @"
+                SELECT IdTipoAuth, Codigo, Nombre, Descripcion, RequiereConfiguracion, EsActivo, FechaCreacion
+                FROM TiposAutenticacion 
+                WHERE EsActivo = 1
+                ORDER BY Nombre";
+
+            var tipos = await _dbService.QueryAsync<TipoAutenticacionDto>(sql);
+
+            _logger.LogInformation("Obtenidos {Count} tipos de autenticaci n soportados", tipos.Count());
+            return tipos.ToList();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error obteniendo tipos de autenticaci n soportados");
+            throw;
+        }
+    }
+
+    public async Task<bool> ValidateAPIAuthConfigAsync(int idApi, TipoAutenticacion tipoAuth)
+    {
+        try
+        {
+            const string sql = @"
+                SELECT COUNT(*)
+                FROM APIs a
+                INNER JOIN TiposAutenticacion ta ON a.IdTipoAuth = ta.IdTipoAuth
+                WHERE a.IdAPI = @IdAPI 
+                AND ta.Codigo = @TipoAuth 
+                AND a.EsActivo = 1 
+                AND ta.EsActivo = 1";
+
+            var count = await _dbService.QueryFirstOrDefaultAsync<int>(sql, new { IdAPI = idApi, TipoAuth = tipoAuth.ToString() });
+
+            var isValid = count > 0;
+            _logger.LogInformation("Validaci n de configuraci n auth para API {IdAPI} con tipo {TipoAuth}: {IsValid}",
+                idApi, tipoAuth, isValid);
+
+            return isValid;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error validando configuraci n auth para API {IdAPI}", idApi);
+            return false;
+        }
+    }
+
+    public async Task<string?> GetAuthConfigurationAsync(int idApi)
+    {
+        try
+        {
+            const string sql = @"
+                SELECT ConfiguracionAuth
+                FROM APIs 
+                WHERE IdAPI = @IdAPI AND EsActivo = 1";
+
+            var config = await _dbService.QueryFirstOrDefaultAsync<string>(sql, new { IdAPI = idApi });
+
+            _logger.LogInformation("Configuraci n auth obtenida para API {IdAPI}: {HasConfig}",
+                idApi, !string.IsNullOrEmpty(config));
+
+            return config;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error obteniendo configuraci n auth para API {IdAPI}", idApi);
+            return null;
+        }
+    }
+
+    // =====================================================
+    // M TODOS DE VALIDACI N Y SEGURIDAD
+    // =====================================================
+
+    public async Task<bool> ValidateCredentialForAPIAsync(string credential, int idApi, TipoAutenticacion expectedType)
+    {
+        try
+        {
+            const string sql = @"
+                SELECT COUNT(*)
+                FROM CredencialesAPI c
+                INNER JOIN APIs a ON c.IdAPI = a.IdAPI
+                INNER JOIN TiposAutenticacion ta ON c.IdTipoAuth = ta.IdTipoAuth
+                WHERE c.ValorCredencial = @Credential
+                AND c.IdAPI = @IdAPI
+                AND ta.Codigo = @TipoAuth
+                AND c.EsActivo = 1
+                AND a.EsActivo = 1
+                AND (c.FechaExpiracion IS NULL OR c.FechaExpiracion > GETDATE())";
+
+            var count = await _dbService.QueryFirstOrDefaultAsync<int>(sql, new
+            {
+                Credential = credential,
+                IdAPI = idApi,
+                TipoAuth = expectedType.ToString()
+            });
+
+            var isValid = count > 0;
+            _logger.LogInformation("Validaci n de credencial para API {IdAPI}: {IsValid}", idApi, isValid);
+
+            return isValid;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error validando credencial para API {IdAPI}", idApi);
+            return false;
+        }
+    }
+
+    public async Task<ApiAuthMetadata?> GetApiAuthMetadataAsync(int idApi)
+    {
+        try
+        {
+            const string sql = @"
+                SELECT 
+                    a.IdAPI,
+                    a.NombreAPI,
+                    ta.Codigo as TipoAutenticacion,
+                    ta.Nombre as NombreTipoAuth,
+                    ta.RequiereConfiguracion,
+                    a.ConfiguracionAuth,
+                    a.RateLimitPorMinuto,
+                    COUNT(c.IdCredencial) as TotalCredenciales,
+                    SUM(CASE WHEN c.EsActivo = 1 AND (c.FechaExpiracion IS NULL OR c.FechaExpiracion > GETDATE()) THEN 1 ELSE 0 END) as CredencialesActivas
+                FROM APIs a
+                INNER JOIN TiposAutenticacion ta ON a.IdTipoAuth = ta.IdTipoAuth
+                LEFT JOIN CredencialesAPI c ON a.IdAPI = c.IdAPI
+                WHERE a.IdAPI = @IdAPI AND a.EsActivo = 1
+                GROUP BY a.IdAPI, a.NombreAPI, ta.Codigo, ta.Nombre, ta.RequiereConfiguracion, a.ConfiguracionAuth, a.RateLimitPorMinuto";
+
+            var metadata = await _dbService.QueryFirstOrDefaultAsync<ApiAuthMetadata>(sql, new { IdAPI = idApi });
+
+            if (metadata != null)
+            {
+                _logger.LogInformation("Metadatos de auth obtenidos para API {IdAPI}: {TipoAuth} con {Credenciales} credenciales activas",
+                    idApi, metadata.TipoAutenticacion, metadata.CredencialesActivas);
+            }
+
+            return metadata;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error obteniendo metadatos de auth para API {IdAPI}", idApi);
+            return null;
+        }
+    }
+
+    // =====================================================
+    // M TODOS DE CONFIGURACI N DIN MICA
+    // =====================================================
+
+    public async Task<Dictionary<string, object>> GetDynamicConfigAsync(int idApi)
+    {
+        try
+        {
+            const string sql = @"
+                SELECT 
+                    a.ConfiguracionAuth,
+                    ta.Codigo as TipoAuth,
+                    cs.StringConexionTest,
+                    cs.StringConexionProduccion,
+                    cs.TimeoutEjecucionSegundos,
+                    cs.UrlBaseDinamica
+                FROM APIs a
+                INNER JOIN TiposAutenticacion ta ON a.IdTipoAuth = ta.IdTipoAuth
+                CROSS JOIN ConfiguracionSistema cs
+                WHERE a.IdAPI = @IdAPI AND a.EsActivo = 1";
+
+            var config = await _dbService.QueryFirstOrDefaultAsync<dynamic>(sql, new { IdAPI = idApi });
+
+            if (config == null) return new Dictionary<string, object>();
+
+            var result = new Dictionary<string, object>
+            {
+                ["TipoAuth"] = config.TipoAuth ?? "NONE",
+                ["StringConexionTest"] = config.StringConexionTest ?? string.Empty,
+                ["StringConexionProduccion"] = config.StringConexionProduccion ?? string.Empty,
+                ["TimeoutEjecucionSegundos"] = config.TimeoutEjecucionSegundos ?? 30,
+                ["UrlBaseDinamica"] = config.UrlBaseDinamica ?? string.Empty
+            };
+
+            if (!string.IsNullOrEmpty(config.ConfiguracionAuth))
+            {
+                result["ConfiguracionAuth"] = config.ConfiguracionAuth;
+            }
+
+            return result;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error obteniendo configuraci n din mica para API {IdAPI}", idApi);
+            return new Dictionary<string, object>();
+        }
+    }
+
+    // =====================================================
+    // M TODOS AUXILIARES
+    // =====================================================
+
+    private string GenerateExampleCall(int idApi, List<ParameterInfo> parametros)
+    {
+        var baseUrl = "/api/execute";
+        var queryParams = new List<string> { $"idApi={idApi}" };
+
+        foreach (var param in parametros.Where(p => p.Requerido))
+        {
+            var exampleValue = GetExampleValue(param.Tipo);
+            queryParams.Add($"{param.Nombre}={exampleValue}");
+        }
+
+        return $"{baseUrl}?{string.Join("&", queryParams)}";
+    }
+
+    private string GetExampleValue(string tipo)
+    {
+        return tipo.ToUpper() switch
+        {
+            "STRING" or "NVARCHAR" or "VARCHAR" or "CHAR" => "ejemplo",
+            "INT" or "INTEGER" or "BIGINT" => "123",
+            "DECIMAL" or "FLOAT" or "DOUBLE" => "123.45",
+            "DATETIME" or "DATE" => DateTime.Now.ToString("yyyy-MM-dd"),
+            "BIT" or "BOOLEAN" => "true",
+            _ => "valor"
+        };
+    }
+
+    public async Task<bool> TestApiConnectionAsync(int idApi, string environment = "TEST")
+    {
+        try
+        {
+            var config = await GetApiConfigurationAsync(idApi);
+            if (config == null) return false;
+
+            var connectionString = environment.ToUpper() == "TEST"
+                ? config.StringConexionTest
+                : config.StringConexionProduccion;
+
+            if (string.IsNullOrEmpty(connectionString)) return false;
+
+            // Probar conexi n simple
+            using var connection = await _dbService.GetConnectionAsync(connectionString);
+            await connection.QueryAsync("SELECT 1");
+
+            _logger.LogInformation("Prueba de conexi n exitosa para API {IdAPI} en ambiente {Environment}", idApi, environment);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error en prueba de conexi n para API {IdAPI} en ambiente {Environment}", idApi, environment);
+            return false;
+        }
+    }
+
+    // =====================================================
+    // MODELOS AUXILIARES
+    // =====================================================
+
+    public class ApiAuthMetadata
+    {
+        public int IdAPI { get; set; }
+        public string NombreAPI { get; set; } = string.Empty;
+        public string TipoAutenticacion { get; set; } = string.Empty;
+        public string NombreTipoAuth { get; set; } = string.Empty;
+        public bool RequiereConfiguracion { get; set; }
+        public string? ConfiguracionAuth { get; set; }
+        public int RateLimitPorMinuto { get; set; }
+        public int TotalCredenciales { get; set; }
+        public int CredencialesActivas { get; set; }
+    }
+}﻿// =====================================================
+// CredencialService - IMPLEMENTACIÓN COMPLETA
+// =====================================================
+
+using System.Security.Cryptography;
+using System.Text;
+using System.Text.Json;
+using Dapper;
+using DSDynamicAPI.Services;
+using DynamicAPIs.Services.Database;
+
+namespace DynamicAPIs.Services.Implementation;
+
+public class CredencialService : ICredencialService
+{
+    private readonly DatabaseService _dbService;
+    private readonly ILogger<CredencialService> _logger;
+    private readonly IAuthenticationService _authService;
+
+    public CredencialService(
+        DatabaseService dbService,
+        ILogger<CredencialService> logger,
+        IAuthenticationService authService)
+    {
+        _dbService = dbService;
+        _logger = logger;
+        _authService = authService;
+    }
+
+    // =====================================================
+    // GESTIÓN BÁSICA DE CREDENCIALES
+    // =====================================================
+
+    public async Task<List<CredencialAPIDto>> GetCredencialsByAPIAsync(int idAPI)
+    {
+        const string sql = @"
+            SELECT 
+                c.IdCredencial, c.IdAPI, c.Nombre, c.ValorCredencial, c.ConfiguracionExtra,
+                c.FechaCreacion, c.FechaExpiracion, c.UltimoUso, c.ContadorUsos, c.EsActivo, c.CreadoPor,
+                ta.Codigo as TipoAutenticacion, ta.Nombre as NombreTipoAuth
+            FROM CredencialesAPI c
+            INNER JOIN TiposAutenticacion ta ON c.IdTipoAuth = ta.IdTipoAuth
+            WHERE c.IdAPI = @IdAPI
+            ORDER BY c.FechaCreacion DESC";
+
+        var credenciales = await _dbService.QueryAsync<CredencialAPIDto>(sql, new { IdAPI = idAPI });
+
+        // Procesar propiedades calculadas
+        foreach (var credencial in credenciales)
+        {
+            ProcessCredentialProperties(credencial);
+        }
+
+        _logger.LogInformation("Obtenidas {Count} credenciales para API {IdAPI}", credenciales.Count(), idAPI);
+        return credenciales.ToList();
+    }
+
+    public async Task<CredencialAPIDto?> GetCredencialByIdAsync(int idCredencial)
+    {
+        const string sql = @"
+            SELECT 
+                c.IdCredencial, c.IdAPI, c.Nombre, c.ValorCredencial, c.ConfiguracionExtra,
+                c.FechaCreacion, c.FechaExpiracion, c.UltimoUso, c.ContadorUsos, c.EsActivo, c.CreadoPor,
+                ta.Codigo as TipoAutenticacion, ta.Nombre as NombreTipoAuth
+            FROM CredencialesAPI c
+            INNER JOIN TiposAutenticacion ta ON c.IdTipoAuth = ta.IdTipoAuth
+            WHERE c.IdCredencial = @IdCredencial";
+
+        var credencial = await _dbService.QueryFirstOrDefaultAsync<CredencialAPIDto>(sql, new { IdCredencial = idCredencial });
+
+        if (credencial != null)
+        {
+            ProcessCredentialProperties(credencial);
+            _logger.LogInformation("Credencial {IdCredencial} obtenida exitosamente", idCredencial);
+        }
+
+        return credencial;
+    }
+
+    public async Task<CredencialAPIDto?> GetCredencialByValueAsync(string valorCredencial)
+    {
+        const string sql = @"
+            SELECT 
+                c.IdCredencial, c.IdAPI, c.Nombre, c.ValorCredencial, c.ConfiguracionExtra,
+                c.FechaCreacion, c.FechaExpiracion, c.UltimoUso, c.ContadorUsos, c.EsActivo, c.CreadoPor,
+                ta.Codigo as TipoAutenticacion, ta.Nombre as NombreTipoAuth
+            FROM CredencialesAPI c
+            INNER JOIN TiposAutenticacion ta ON c.IdTipoAuth = ta.IdTipoAuth
+            WHERE c.ValorCredencial = @ValorCredencial";
+
+        var credencial = await _dbService.QueryFirstOrDefaultAsync<CredencialAPIDto>(sql, new { ValorCredencial = valorCredencial });
+
+        if (credencial != null)
+        {
+            ProcessCredentialProperties(credencial);
+        }
+
+        return credencial;
+    }
+
+    public async Task<List<CredencialAPIDto>> GetAllCredencialesAsync()
+    {
+        const string sql = @"
+            SELECT 
+                c.IdCredencial, c.IdAPI, c.Nombre, c.ValorCredencial, c.ConfiguracionExtra,
+                c.FechaCreacion, c.FechaExpiracion, c.UltimoUso, c.ContadorUsos, c.EsActivo, c.CreadoPor,
+                ta.Codigo as TipoAutenticacion, ta.Nombre as NombreTipoAuth,
+                a.NombreAPI
+            FROM CredencialesAPI c
+            INNER JOIN TiposAutenticacion ta ON c.IdTipoAuth = ta.IdTipoAuth
+            INNER JOIN APIs a ON c.IdAPI = a.IdAPI
+            ORDER BY c.FechaCreacion DESC";
+
+        var credenciales = await _dbService.QueryAsync<CredencialAPIDto>(sql);
+
+        foreach (var credencial in credenciales)
+        {
+            ProcessCredentialProperties(credencial);
+        }
+
+        _logger.LogInformation("Obtenidas {Count} credenciales totales del sistema", credenciales.Count());
+        return credenciales.ToList();
+    }
+
+    public async Task<List<CredencialAPIDto>> GetCredencialesByTypeAsync(TipoAutenticacion tipoAuth)
+    {
+        const string sql = @"
+            SELECT 
+                c.IdCredencial, c.IdAPI, c.Nombre, c.ValorCredencial, c.ConfiguracionExtra,
+                c.FechaCreacion, c.FechaExpiracion, c.UltimoUso, c.ContadorUsos, c.EsActivo, c.CreadoPor,
+                ta.Codigo as TipoAutenticacion, ta.Nombre as NombreTipoAuth,
+                a.NombreAPI
+            FROM CredencialesAPI c
+            INNER JOIN TiposAutenticacion ta ON c.IdTipoAuth = ta.IdTipoAuth
+            INNER JOIN APIs a ON c.IdAPI = a.IdAPI
+            WHERE ta.Codigo = @TipoAuth
+            ORDER BY c.FechaCreacion DESC";
+
+        var credenciales = await _dbService.QueryAsync<CredencialAPIDto>(sql, new { TipoAuth = tipoAuth.ToString() });
+
+        foreach (var credencial in credenciales)
+        {
+            ProcessCredentialProperties(credencial);
+        }
+
+        _logger.LogInformation("Obtenidas {Count} credenciales de tipo {TipoAuth}", credenciales.Count(), tipoAuth);
+        return credenciales.ToList();
+    }
+
+    // =====================================================
+    // CREACIÓN Y GESTIÓN DE CREDENCIALES
+    // =====================================================
+
+    public async Task<int> CreateCredencialAsync(CredencialAPIDto credencial)
+    {
+        const string sql = @"
+            INSERT INTO CredencialesAPI (
+                IdAPI, IdTipoAuth, Nombre, ValorCredencial, ConfiguracionExtra, 
+                FechaExpiracion, EsActivo, CreadoPor
+            )
+            SELECT 
+                @IdAPI, ta.IdTipoAuth, @Nombre, @ValorCredencial, @ConfiguracionExtra,
+                @FechaExpiracion, @EsActivo, @CreadoPor
+            FROM TiposAutenticacion ta
+            WHERE ta.Codigo = @TipoAutenticacion;
+            
+            SELECT SCOPE_IDENTITY();";
+
+        var idCredencial = await _dbService.QueryFirstOrDefaultAsync<int>(sql, new
+        {
+            credencial.IdAPI,
+            TipoAutenticacion = credencial.TipoAutenticacion,
+            credencial.Nombre,
+            credencial.ValorCredencial,
+            credencial.ConfiguracionExtra,
+            credencial.FechaExpiracion,
+            credencial.EsActivo,
+            credencial.CreadoPor
+        });
+
+        _logger.LogInformation("Credencial creada exitosamente: ID={IdCredencial}, API={IdAPI}, Tipo={TipoAuth}",
+            idCredencial, credencial.IdAPI, credencial.TipoAutenticacion);
+
+        return idCredencial;
+    }
+
+    public async Task<bool> UpdateCredencialAsync(CredencialAPIDto credencial)
+    {
+        const string sql = @"
+            UPDATE CredencialesAPI 
+            SET Nombre = @Nombre,
+                ConfiguracionExtra = @ConfiguracionExtra,
+                FechaExpiracion = @FechaExpiracion,
+                EsActivo = @EsActivo
+            WHERE IdCredencial = @IdCredencial";
+
+        var rowsAffected = await _dbService.ExecuteAsync(sql, new
+        {
+            credencial.IdCredencial,
+            credencial.Nombre,
+            credencial.ConfiguracionExtra,
+            credencial.FechaExpiracion,
+            credencial.EsActivo
+        });
+
+        if (rowsAffected > 0)
+        {
+            _logger.LogInformation("Credencial actualizada: ID={IdCredencial}", credencial.IdCredencial);
+        }
+
+        return rowsAffected > 0;
+    }
+
+    public async Task<bool> DeleteCredencialAsync(int idCredencial)
+    {
+        const string sql = "DELETE FROM CredencialesAPI WHERE IdCredencial = @IdCredencial";
+        var rowsAffected = await _dbService.ExecuteAsync(sql, new { IdCredencial = idCredencial });
+
+        if (rowsAffected > 0)
+        {
+            _logger.LogInformation("Credencial eliminada: ID={IdCredencial}", idCredencial);
+        }
+
+        return rowsAffected > 0;
+    }
+
+    public async Task<bool> ToggleCredencialStatusAsync(int idCredencial)
+    {
+        const string sql = @"
+            UPDATE CredencialesAPI 
+            SET EsActivo = CASE WHEN EsActivo = 1 THEN 0 ELSE 1 END
+            WHERE IdCredencial = @IdCredencial";
+
+        var rowsAffected = await _dbService.ExecuteAsync(sql, new { IdCredencial = idCredencial });
+
+        if (rowsAffected > 0)
+        {
+            _logger.LogInformation("Estado de credencial cambiado: ID={IdCredencial}", idCredencial);
+        }
+
+        return rowsAffected > 0;
+    }
+
+    // =====================================================
+    // GENERACIÓN AUTOMÁTICA DE CREDENCIALES
+    // =====================================================
+
+    public async Task<string> GenerateTokenAsync(int idAPI, int diasExpiracion = 365, string? creadoPor = null)
+    {
+        var tokenValue = GenerateSecureToken();
+        var nombre = $"Token-{DateTime.Now:yyyyMMddHHmmss}";
+
+        var credencial = new CredencialAPIDto
+        {
+            IdAPI = idAPI,
+            TipoAutenticacion = "TOKEN",
+            Nombre = nombre,
+            ValorCredencial = tokenValue,
+            FechaExpiracion = DateTime.Now.AddDays(diasExpiracion),
+            EsActivo = true,
+            CreadoPor = creadoPor ?? "SYSTEM"
+        };
+
+        await CreateCredencialAsync(credencial);
+
+        _logger.LogInformation("Token generado para API {IdAPI}, expira en {Dias} días", idAPI, diasExpiracion);
+
+        return tokenValue;
+    }
+
+    public async Task<string> GenerateApiKeyAsync(int idAPI, int? diasExpiracion = null, string? creadoPor = null)
+    {
+        var apiKeyValue = GenerateSecureApiKey();
+        var nombre = $"ApiKey-{DateTime.Now:yyyyMMddHHmmss}";
+
+        var credencial = new CredencialAPIDto
+        {
+            IdAPI = idAPI,
+            TipoAutenticacion = "APIKEY",
+            Nombre = nombre,
+            ValorCredencial = apiKeyValue,
+            FechaExpiracion = diasExpiracion.HasValue ? DateTime.Now.AddDays(diasExpiracion.Value) : null,
+            EsActivo = true,
+            CreadoPor = creadoPor ?? "SYSTEM"
+        };
+
+        await CreateCredencialAsync(credencial);
+
+        _logger.LogInformation("API Key generada para API {IdAPI}", idAPI);
+
+        return apiKeyValue;
+    }
+
+    public async Task<CredencialAPIDto> CreateJWTCredentialAsync(int idAPI, string valorJWT, object? configuracion = null, int? diasExpiracion = null, string? creadoPor = null)
+    {
+        var nombre = $"JWT-{DateTime.Now:yyyyMMddHHmmss}";
+        var configJson = configuracion != null ? JsonSerializer.Serialize(configuracion) : null;
+
+        var credencial = new CredencialAPIDto
+        {
+            IdAPI = idAPI,
+            TipoAutenticacion = "JWT",
+            Nombre = nombre,
+            ValorCredencial = valorJWT,
+            ConfiguracionExtra = configJson,
+            FechaExpiracion = diasExpiracion.HasValue ? DateTime.Now.AddDays(diasExpiracion.Value) : null,
+            EsActivo = true,
+            CreadoPor = creadoPor ?? "SYSTEM"
+        };
+
+        credencial.IdCredencial = await CreateCredencialAsync(credencial);
+
+        _logger.LogInformation("Credencial JWT creada para API {IdAPI}", idAPI);
+
+        return credencial;
+    }
+
+    // =====================================================
+    // VALIDACIÓN Y AUTENTICACIÓN
+    // =====================================================
+
+    public async Task<AuthValidationResult> ValidateCredentialAsync(CredentialValidationRequest request)
+    {
+        try
+        {
+            // Delegar al servicio de autenticación principal
+            return await _authService.AuthenticateAsync(request);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error validando credencial para API {IdAPI}", request.IdAPI);
+            return new AuthValidationResult
+            {
+                IsValid = false,
+                ErrorMessage = "Error interno validando credencial",
+                IdAPI = request.IdAPI
+            };
+        }
+    }
+
+    public async Task<bool> ValidateCredentialSimpleAsync(string valorCredencial, int? idAPI = null)
+    {
+        const string sql = @"
+            SELECT COUNT(*)
+            FROM CredencialesAPI c
+            INNER JOIN APIs a ON c.IdAPI = a.IdAPI
+            WHERE c.ValorCredencial = @ValorCredencial
+            AND c.EsActivo = 1
+            AND a.EsActivo = 1
+            AND (c.FechaExpiracion IS NULL OR c.FechaExpiracion > GETDATE())
+            AND (@IdAPI IS NULL OR c.IdAPI = @IdAPI)";
+
+        var count = await _dbService.QueryFirstOrDefaultAsync<int>(sql, new { ValorCredencial = valorCredencial, IdAPI = idAPI });
+
+        return count > 0;
+    }
+
+    public async Task<bool> CheckRateLimitAsync(int idCredencial)
+    {
+        // Delegar al servicio de autenticación
+        return await _authService.CheckRateLimitAsync(idCredencial, 0); // IdAPI se obtiene internamente
+    }
+
+    // =====================================================
+    // GESTIÓN DE EXPIRACIÓN
+    // =====================================================
+
+    public async Task<List<CredencialAPIDto>> GetExpiredCredentialsAsync()
+    {
+        const string sql = @"
+            SELECT 
+                c.IdCredencial, c.IdAPI, c.Nombre, c.ValorCredencial, c.ConfiguracionExtra,
+                c.FechaCreacion, c.FechaExpiracion, c.UltimoUso, c.ContadorUsos, c.EsActivo, c.CreadoPor,
+                ta.Codigo as TipoAutenticacion, ta.Nombre as NombreTipoAuth,
+                a.NombreAPI
+            FROM CredencialesAPI c
+            INNER JOIN TiposAutenticacion ta ON c.IdTipoAuth = ta.IdTipoAuth
+            INNER JOIN APIs a ON c.IdAPI = a.IdAPI
+            WHERE c.FechaExpiracion IS NOT NULL 
+            AND c.FechaExpiracion <= GETDATE()
+            AND c.EsActivo = 1
+            ORDER BY c.FechaExpiracion";
+
+        var credenciales = await _dbService.QueryAsync<CredencialAPIDto>(sql);
+
+        foreach (var credencial in credenciales)
+        {
+            ProcessCredentialProperties(credencial);
+        }
+
+        _logger.LogInformation("Encontradas {Count} credenciales expiradas", credenciales.Count());
+        return credenciales.ToList();
+    }
+
+    public async Task<List<CredencialAPIDto>> GetCredentialsExpiringSoonAsync(int days = 7)
+    {
+        const string sql = @"
+            SELECT 
+                c.IdCredencial, c.IdAPI, c.Nombre, c.ValorCredencial, c.ConfiguracionExtra,
+                c.FechaCreacion, c.FechaExpiracion, c.UltimoUso, c.ContadorUsos, c.EsActivo, c.CreadoPor,
+                ta.Codigo as TipoAutenticacion, ta.Nombre as NombreTipoAuth,
+                a.NombreAPI
+            FROM CredencialesAPI c
+            INNER JOIN TiposAutenticacion ta ON c.IdTipoAuth = ta.IdTipoAuth
+            INNER JOIN APIs a ON c.IdAPI = a.IdAPI
+            WHERE c.FechaExpiracion IS NOT NULL 
+            AND c.FechaExpiracion > GETDATE()
+            AND c.FechaExpiracion <= DATEADD(DAY, @Days, GETDATE())
+            AND c.EsActivo = 1
+            ORDER BY c.FechaExpiracion";
+
+        var credenciales = await _dbService.QueryAsync<CredencialAPIDto>(sql, new { Days = days });
+
+        foreach (var credencial in credenciales)
+        {
+            ProcessCredentialProperties(credencial);
+        }
+
+        _logger.LogInformation("Encontradas {Count} credenciales que expiran en {Days} días", credenciales.Count(), days);
+        return credenciales.ToList();
+    }
+
+    public async Task<int> CleanupExpiredCredentialsAsync()
+    {
+        const string sql = @"
+            UPDATE CredencialesAPI 
+            SET EsActivo = 0
+            WHERE FechaExpiracion IS NOT NULL 
+            AND FechaExpiracion <= GETDATE()
+            AND EsActivo = 1";
+
+        var rowsAffected = await _dbService.ExecuteAsync(sql);
+
+        _logger.LogInformation("Limpieza de credenciales expiradas: {Count} credenciales desactivadas", rowsAffected);
+        return rowsAffected;
+    }
+
+    public async Task<bool> RevokeCredentialAsync(int idCredencial)
+    {
+        const string sql = @"
+            UPDATE CredencialesAPI 
+            SET EsActivo = 0, FechaExpiracion = GETDATE()
+            WHERE IdCredencial = @IdCredencial";
+
+        var rowsAffected = await _dbService.ExecuteAsync(sql, new { IdCredencial = idCredencial });
+
+        if (rowsAffected > 0)
+        {
+            _logger.LogInformation("Credencial revocada: ID={IdCredencial}", idCredencial);
+        }
+
+        return rowsAffected > 0;
+    }
+
+    public async Task<bool> ExtendCredentialExpirationAsync(int idCredencial, int additionalDays)
+    {
+        const string sql = @"
+            UPDATE CredencialesAPI 
+            SET FechaExpiracion = CASE 
+                WHEN FechaExpiracion IS NULL THEN DATEADD(DAY, @AdditionalDays, GETDATE())
+                ELSE DATEADD(DAY, @AdditionalDays, FechaExpiracion)
+            END
+            WHERE IdCredencial = @IdCredencial";
+
+        var rowsAffected = await _dbService.ExecuteAsync(sql, new { IdCredencial = idCredencial, AdditionalDays = additionalDays });
+
+        if (rowsAffected > 0)
+        {
+            _logger.LogInformation("Expiración extendida para credencial {IdCredencial} por {Days} días", idCredencial, additionalDays);
+        }
+
+        return rowsAffected > 0;
+    }
+
+    // =====================================================
+    // ESTADÍSTICAS Y MONITOREO
+    // =====================================================
+
+    public async Task<int> GetActiveCredentialsCountAsync(int? idAPI = null)
+    {
+        const string sql = @"
+            SELECT COUNT(*)
+            FROM CredencialesAPI c
+            INNER JOIN APIs a ON c.IdAPI = a.IdAPI
+            WHERE c.EsActivo = 1
+            AND a.EsActivo = 1
+            AND (c.FechaExpiracion IS NULL OR c.FechaExpiracion > GETDATE())
+            AND (@IdAPI IS NULL OR c.IdAPI = @IdAPI)";
+
+        var count = await _dbService.QueryFirstOrDefaultAsync<int>(sql, new { IdAPI = idAPI });
+
+        return count;
+    }
+
+    public async Task<List<CredencialAPIDto>> GetCredentialsExceedingLimitAsync()
+    {
+        const string sql = @"
+            SELECT 
+                c.IdCredencial, c.IdAPI, c.Nombre, c.ValorCredencial, c.ConfiguracionExtra,
+                c.FechaCreacion, c.FechaExpiracion, c.UltimoUso, c.ContadorUsos, c.EsActivo, c.CreadoPor,
+                ta.Codigo as TipoAutenticacion, ta.Nombre as NombreTipoAuth,
+                a.NombreAPI, a.RateLimitPorMinuto,
+                COUNT(al.IdCredencial) as UsosRecientes
+            FROM CredencialesAPI c
+            INNER JOIN TiposAutenticacion ta ON c.IdTipoAuth = ta.IdTipoAuth
+            INNER JOIN APIs a ON c.IdAPI = a.IdAPI
+            LEFT JOIN AuditLogs al ON c.IdCredencial = al.IdCredencial 
+                AND al.FechaEjecucion >= DATEADD(MINUTE, -1, GETDATE())
+            WHERE c.EsActivo = 1
+            AND a.EsActivo = 1
+            AND (c.FechaExpiracion IS NULL OR c.FechaExpiracion > GETDATE())
+            GROUP BY 
+                c.IdCredencial, c.IdAPI, c.Nombre, c.ValorCredencial, c.ConfiguracionExtra,
+                c.FechaCreacion, c.FechaExpiracion, c.UltimoUso, c.ContadorUsos, c.EsActivo, c.CreadoPor,
+                ta.Codigo, ta.Nombre, a.NombreAPI, a.RateLimitPorMinuto
+            HAVING COUNT(al.IdCredencial) >= a.RateLimitPorMinuto";
+
+        var credenciales = await _dbService.QueryAsync<CredencialAPIDto>(sql);
+
+        foreach (var credencial in credenciales)
+        {
+            ProcessCredentialProperties(credencial);
+        }
+
+        _logger.LogInformation("Encontradas {Count} credenciales excediendo rate limit", credenciales.Count());
+        return credenciales.ToList();
+    }
+
+    public async Task<Dictionary<TipoAutenticacion, int>> GetCredentialsByTypeStatsAsync()
+    {
+        const string sql = @"
+            SELECT ta.Codigo, COUNT(c.IdCredencial) as Count
+            FROM TiposAutenticacion ta
+            LEFT JOIN CredencialesAPI c ON ta.IdTipoAuth = c.IdTipoAuth 
+                AND c.EsActivo = 1 
+                AND (c.FechaExpiracion IS NULL OR c.FechaExpiracion > GETDATE())
+            WHERE ta.EsActivo = 1
+            GROUP BY ta.Codigo";
+
+        var results = await _dbService.QueryAsync<dynamic>(sql);
+
+        var stats = new Dictionary<TipoAutenticacion, int>();
+
+        foreach (var result in results)
+        {
+            if (Enum.TryParse<TipoAutenticacion>(result.Codigo, out TipoAutenticacion tipoAuth))
+            {
+                stats[tipoAuth] = result.Count ?? 0;
+            }
+        }
+
+        return stats;
+    }
+
+    // =====================================================
+    // MÉTODOS AUXILIARES
+    // =====================================================
+
+    private void ProcessCredentialProperties(CredencialAPIDto credencial)
+    {
+        // Procesar propiedades calculadas
+        credencial.EstaExpirada = credencial.FechaExpiracion.HasValue && credencial.FechaExpiracion.Value <= DateTime.Now;
+        credencial.DaysUntilExpiration = credencial.FechaExpiracion?.Subtract(DateTime.Now).Days;
+
+        // Crear valor enmascarado para mostrar
+        if (!string.IsNullOrEmpty(credencial.ValorCredencial))
+        {
+            if (credencial.ValorCredencial.Length > 8)
+            {
+                credencial.ValorEnmascarado = credencial.ValorCredencial[..4] + "***" + credencial.ValorCredencial[^4..];
+            }
+            else
+            {
+                credencial.ValorEnmascarado = credencial.ValorCredencial[..2] + "***";
+            }
+        }
+
+        // Textos para UI
+        credencial.EstadoTexto = credencial.EsActivo
+            ? (credencial.EstaExpirada ? "Expirada" : "Activa")
+            : "Inactiva";
+
+        credencial.FechaExpiracionTexto = credencial.FechaExpiracion?.ToString("dd/MM/yyyy") ?? "Sin expiración";
+        credencial.UltimoUsoTexto = credencial.UltimoUso?.ToString("dd/MM/yyyy HH:mm") ?? "Nunca";
+    }
+
+    private string GenerateSecureToken()
+    {
+        const string prefix = "tk_";
+        const int length = 32;
+
+        using var rng = RandomNumberGenerator.Create();
+        var bytes = new byte[length];
+        rng.GetBytes(bytes);
+
+        var token = prefix + Convert.ToBase64String(bytes).Replace("+", "").Replace("/", "").Replace("=", "")[..length];
+
+        return token;
+    }
+
+    private string GenerateSecureApiKey()
+    {
+        const string prefix = "ak_";
+        const int length = 40;
+
+        using var rng = RandomNumberGenerator.Create();
+        var bytes = new byte[length];
+        rng.GetBytes(bytes);
+
+        var apiKey = prefix + Convert.ToHexString(bytes)[..length];
+
+        return apiKey.ToLower();
+    }
+
+    private async Task<bool> ValidateCredentialFormatAsync(string valorCredencial, TipoAutenticacion tipoAuth)
+    {
+        return tipoAuth switch
+        {
+            TipoAutenticacion.TOKEN => valorCredencial.StartsWith("tk_") && valorCredencial.Length >= 32,
+            TipoAutenticacion.APIKEY => valorCredencial.StartsWith("ak_") && valorCredencial.Length >= 32,
+            TipoAutenticacion.JWT => IsValidJWTFormat(valorCredencial),
+            TipoAutenticacion.BASIC => IsValidBasicAuthFormat(valorCredencial),
+            _ => true // Para otros tipos, asumimos válido
+        };
+    }
+
+    private bool IsValidJWTFormat(string jwt)
+    {
+        var parts = jwt.Split('.');
+        return parts.Length == 3 && parts.All(part => !string.IsNullOrEmpty(part));
+    }
+
+    private bool IsValidBasicAuthFormat(string basic)
+    {
+        try
+        {
+            if (basic.StartsWith("Basic ", StringComparison.OrdinalIgnoreCase))
+            {
+                basic = basic["Basic ".Length..];
+            }
+
+            var bytes = Convert.FromBase64String(basic);
+            var decoded = Encoding.UTF8.GetString(bytes);
+            return decoded.Contains(':');
+        }
+        catch
+        {
+            return false;
+        }
+    }
+}﻿// =====================================================
+// DatabaseService - SERVICIO BASE DE DATOS COMPLETO
+// =====================================================
+
+using Dapper;
+using Microsoft.Data.SqlClient;
+using Microsoft.Extensions.Options;
+using System.Data;
+
+namespace DynamicAPIs.Services.Database;
+
+public class DatabaseService
+{
+    private readonly DatabaseOptions _options;
+    private readonly ILogger<DatabaseService> _logger;
+
+    public DatabaseService(IOptions<DatabaseOptions> options, ILogger<DatabaseService> logger)
+    {
+        _options = options.Value;
+        _logger = logger;
+    }
+
+    // =====================================================
+    // MÉTODOS DE CONEXIÓN
+    // =====================================================
+
+    public async Task<IDbConnection> GetConnectionAsync(string? connectionString = null)
+    {
+        var connString = connectionString ?? _options.ConfigConnectionString;
+
+        if (string.IsNullOrEmpty(connString))
+        {
+            throw new InvalidOperationException("String de conexión no configurado");
+        }
+
+        var connection = new SqlConnection(connString);
+        await connection.OpenAsync();
+
+        return connection;
+    }
+
+    public IDbConnection GetConnection(string? connectionString = null)
+    {
+        var connString = connectionString ?? _options.ConfigConnectionString;
+
+        if (string.IsNullOrEmpty(connString))
+        {
+            throw new InvalidOperationException("String de conexión no configurado");
+        }
+
+        var connection = new SqlConnection(connString);
+        connection.Open();
+
+        return connection;
+    }
+
+    // =====================================================
+    // MÉTODOS DE CONSULTA ASÍNCRONOS
+    // =====================================================
+
+    public async Task<IEnumerable<T>> QueryAsync<T>(string sql, object? param = null, int? commandTimeout = null)
+    {
+        try
+        {
+            using var connection = await GetConnectionAsync();
+
+            var result = await connection.QueryAsync<T>(sql, param, commandTimeout: commandTimeout ?? _options.DefaultCommandTimeout);
+
+            _logger.LogDebug("Query ejecutado exitosamente: {RowCount} filas retornadas", result.Count());
+
+            return result;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error ejecutando query: {Sql}", sql);
+            throw;
+        }
+    }
+
+    public async Task<T?> QueryFirstOrDefaultAsync<T>(string sql, object? param = null, int? commandTimeout = null)
+    {
+        try
+        {
+            using var connection = await GetConnectionAsync();
+
+            var result = await connection.QueryFirstOrDefaultAsync<T>(sql, param, commandTimeout: commandTimeout ?? _options.DefaultCommandTimeout);
+
+            _logger.LogDebug("QueryFirstOrDefault ejecutado exitosamente");
+
+            return result;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error ejecutando QueryFirstOrDefault: {Sql}", sql);
+            throw;
+        }
+    }
+
+    public async Task<T> QuerySingleAsync<T>(string sql, object? param = null, int? commandTimeout = null)
+    {
+        try
+        {
+            using var connection = await GetConnectionAsync();
+
+            var result = await connection.QuerySingleAsync<T>(sql, param, commandTimeout: commandTimeout ?? _options.DefaultCommandTimeout);
+
+            _logger.LogDebug("QuerySingle ejecutado exitosamente");
+
+            return result;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error ejecutando QuerySingle: {Sql}", sql);
+            throw;
+        }
+    }
+
+    public async Task<int> ExecuteAsync(string sql, object? param = null, int? commandTimeout = null)
+    {
+        try
+        {
+            using var connection = await GetConnectionAsync();
+
+            var result = await connection.ExecuteAsync(sql, param, commandTimeout: commandTimeout ?? _options.DefaultCommandTimeout);
+
+            _logger.LogDebug("Execute ejecutado exitosamente: {RowsAffected} filas afectadas", result);
+
+            return result;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error ejecutando Execute: {Sql}", sql);
+            throw;
+        }
+    }
+
+    public async Task<T> ExecuteScalarAsync<T>(string sql, object? param = null, int? commandTimeout = null)
+    {
+        try
+        {
+            using var connection = await GetConnectionAsync();
+
+            var result = await connection.ExecuteScalarAsync<T>(sql, param, commandTimeout: commandTimeout ?? _options.DefaultCommandTimeout);
+
+            _logger.LogDebug("ExecuteScalar ejecutado exitosamente");
+
+            return result;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error ejecutando ExecuteScalar: {Sql}", sql);
+            throw;
+        }
+    }
+
+    // =====================================================
+    // MÉTODOS ESPECÍFICOS PARA TIPOS SEGUROS
+    // =====================================================
+
+    public async Task<long> QueryFirstOrDefaultAsLongAsync(string sql, object? param = null, int? commandTimeout = null)
+    {
+        try
+        {
+            using var connection = await GetConnectionAsync();
+
+            var result = await connection.QueryFirstOrDefaultAsync<long?>(sql, param, commandTimeout: commandTimeout ?? _options.DefaultCommandTimeout);
+
+            _logger.LogDebug("QueryFirstOrDefaultAsLong ejecutado exitosamente");
+
+            return result ?? 0L;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error ejecutando QueryFirstOrDefaultAsLong: {Sql}", sql);
+            throw;
+        }
+    }
+
+    public async Task<double> QueryFirstOrDefaultAsDoubleAsync(string sql, object? param = null, int? commandTimeout = null)
+    {
+        try
+        {
+            using var connection = await GetConnectionAsync();
+
+            var result = await connection.QueryFirstOrDefaultAsync<double?>(sql, param, commandTimeout: commandTimeout ?? _options.DefaultCommandTimeout);
+
+            _logger.LogDebug("QueryFirstOrDefaultAsDouble ejecutado exitosamente");
+
+            return result ?? 0.0;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error ejecutando QueryFirstOrDefaultAsDouble: {Sql}", sql);
+            throw;
+        }
+    }
+
+    public async Task<int> QueryFirstOrDefaultAsIntAsync(string sql, object? param = null, int? commandTimeout = null)
+    {
+        try
+        {
+            using var connection = await GetConnectionAsync();
+
+            var result = await connection.QueryFirstOrDefaultAsync<int?>(sql, param, commandTimeout: commandTimeout ?? _options.DefaultCommandTimeout);
+
+            _logger.LogDebug("QueryFirstOrDefaultAsInt ejecutado exitosamente");
+
+            return result ?? 0;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error ejecutando QueryFirstOrDefaultAsInt: {Sql}", sql);
+            throw;
+        }
+    }
+
+    public async Task<string> QueryFirstOrDefaultAsStringAsync(string sql, object? param = null, int? commandTimeout = null)
+    {
+        try
+        {
+            using var connection = await GetConnectionAsync();
+
+            var result = await connection.QueryFirstOrDefaultAsync<string?>(sql, param, commandTimeout: commandTimeout ?? _options.DefaultCommandTimeout);
+
+            _logger.LogDebug("QueryFirstOrDefaultAsString ejecutado exitosamente");
+
+            return result ?? string.Empty;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error ejecutando QueryFirstOrDefaultAsString: {Sql}", sql);
+            throw;
+        }
+    }
+
+    public async Task<bool> QueryFirstOrDefaultAsBoolAsync(string sql, object? param = null, int? commandTimeout = null)
+    {
+        try
+        {
+            using var connection = await GetConnectionAsync();
+
+            var result = await connection.QueryFirstOrDefaultAsync<bool?>(sql, param, commandTimeout: commandTimeout ?? _options.DefaultCommandTimeout);
+
+            _logger.LogDebug("QueryFirstOrDefaultAsBool ejecutado exitosamente");
+
+            return result ?? false;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error ejecutando QueryFirstOrDefaultAsBool: {Sql}", sql);
+            throw;
+        }
+    }
+
+    // =====================================================
+    // MÉTODOS DE STORED PROCEDURES
+    // =====================================================
+
+    public async Task<IEnumerable<T>> ExecuteStoredProcedureAsync<T>(string procedureName, object? parameters = null, int? commandTimeout = null)
+    {
+        try
+        {
+            using var connection = await GetConnectionAsync();
+
+            var result = await connection.QueryAsync<T>(
+                procedureName,
+                parameters,
+                commandType: CommandType.StoredProcedure,
+                commandTimeout: commandTimeout ?? _options.DefaultCommandTimeout);
+
+            _logger.LogDebug("Stored procedure {ProcedureName} ejecutado exitosamente: {RowCount} filas retornadas",
+                procedureName, result.Count());
+
+            return result;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error ejecutando stored procedure: {ProcedureName}", procedureName);
+            throw;
+        }
+    }
+
+    public async Task<T?> ExecuteStoredProcedureFirstOrDefaultAsync<T>(string procedureName, object? parameters = null, int? commandTimeout = null)
+    {
+        try
+        {
+            using var connection = await GetConnectionAsync();
+
+            var result = await connection.QueryFirstOrDefaultAsync<T>(
+                procedureName,
+                parameters,
+                commandType: CommandType.StoredProcedure,
+                commandTimeout: commandTimeout ?? _options.DefaultCommandTimeout);
+
+            _logger.LogDebug("Stored procedure {ProcedureName} ejecutado exitosamente", procedureName);
+
+            return result;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error ejecutando stored procedure: {ProcedureName}", procedureName);
+            throw;
+        }
+    }
+
+    public async Task<int> ExecuteStoredProcedureAsync(string procedureName, object? parameters = null, int? commandTimeout = null)
+    {
+        try
+        {
+            using var connection = await GetConnectionAsync();
+
+            var result = await connection.ExecuteAsync(
+                procedureName,
+                parameters,
+                commandType: CommandType.StoredProcedure,
+                commandTimeout: commandTimeout ?? _options.DefaultCommandTimeout);
+
+            _logger.LogDebug("Stored procedure {ProcedureName} ejecutado exitosamente: {RowsAffected} filas afectadas",
+                procedureName, result);
+
+            return result;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error ejecutando stored procedure: {ProcedureName}", procedureName);
+            throw;
+        }
+    }
+
+    // =====================================================
+    // MÉTODOS DE TRANSACCIONES
+    // =====================================================
+
+    public async Task<T> ExecuteInTransactionAsync<T>(Func<IDbConnection, IDbTransaction, Task<T>> operation)
+    {
+        using var connection = await GetConnectionAsync();
+        using var transaction = connection.BeginTransaction();
+
+        try
+        {
+            var result = await operation(connection, transaction);
+            transaction.Commit();
+
+            _logger.LogDebug("Transacción ejecutada exitosamente");
+
+            return result;
+        }
+        catch (Exception ex)
+        {
+            transaction.Rollback();
+            _logger.LogError(ex, "Error en transacción, se realizó rollback");
+            throw;
+        }
+    }
+
+    public async Task ExecuteInTransactionAsync(Func<IDbConnection, IDbTransaction, Task> operation)
+    {
+        using var connection = await GetConnectionAsync();
+        using var transaction = connection.BeginTransaction();
+
+        try
+        {
+            await operation(connection, transaction);
+            transaction.Commit();
+
+            _logger.LogDebug("Transacción ejecutada exitosamente");
+        }
+        catch (Exception ex)
+        {
+            transaction.Rollback();
+            _logger.LogError(ex, "Error en transacción, se realizó rollback");
+            throw;
+        }
+    }
+
+    // =====================================================
+    // MÉTODOS DE MÚLTIPLES RESULTADOS
+    // =====================================================
+
+    public async Task<SqlMapper.GridReader> QueryMultipleAsync(string sql, object? param = null, int? commandTimeout = null)
+    {
+        try
+        {
+            var connection = await GetConnectionAsync();
+
+            var result = await connection.QueryMultipleAsync(sql, param, commandTimeout: commandTimeout ?? _options.DefaultCommandTimeout);
+
+            _logger.LogDebug("QueryMultiple ejecutado exitosamente");
+
+            return result;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error ejecutando QueryMultiple: {Sql}", sql);
+            throw;
+        }
+    }
+
+    // =====================================================
+    // MÉTODOS DE UTILIDAD
+    // =====================================================
+
+    public async Task<bool> TestConnectionAsync(string? connectionString = null)
+    {
+        try
+        {
+            using var connection = await GetConnectionAsync(connectionString);
+            await connection.QueryAsync("SELECT 1");
+
+            _logger.LogInformation("Prueba de conexión exitosa");
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error en prueba de conexión");
+            return false;
+        }
+    }
+
+    public async Task<string> GetDatabaseVersionAsync()
+    {
+        try
+        {
+            using var connection = await GetConnectionAsync();
+            var version = await connection.QueryFirstOrDefaultAsync<string>("SELECT @@VERSION");
+
+            return version ?? "Versión desconocida";
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error obteniendo versión de base de datos");
+            return "Error obteniendo versión";
+        }
+    }
+
+    public async Task<bool> TableExistsAsync(string tableName, string? schema = "dbo")
+    {
+        try
+        {
+            const string sql = @"
+                SELECT COUNT(*) 
+                FROM INFORMATION_SCHEMA.TABLES 
+                WHERE TABLE_SCHEMA = @Schema AND TABLE_NAME = @TableName";
+
+            using var connection = await GetConnectionAsync();
+            var count = await connection.QueryFirstOrDefaultAsync<int>(sql, new { Schema = schema, TableName = tableName });
+
+            return count > 0;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error verificando existencia de tabla {TableName}", tableName);
+            return false;
+        }
+    }
+
+    public async Task<bool> StoredProcedureExistsAsync(string procedureName, string? schema = "dbo")
+    {
+        try
+        {
+            const string sql = @"
+                SELECT COUNT(*) 
+                FROM INFORMATION_SCHEMA.ROUTINES 
+                WHERE ROUTINE_SCHEMA = @Schema AND ROUTINE_NAME = @ProcedureName AND ROUTINE_TYPE = 'PROCEDURE'";
+
+            using var connection = await GetConnectionAsync();
+            var count = await connection.QueryFirstOrDefaultAsync<int>(sql, new { Schema = schema, ProcedureName = procedureName });
+
+            return count > 0;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error verificando existencia de procedimiento {ProcedureName}", procedureName);
+            return false;
+        }
+    }
+
+    // =====================================================
+    // MÉTODOS AUXILIARES ADICIONALES
+    // =====================================================
+
+    public async Task<List<T>> QueryToListAsync<T>(string sql, object? param = null, int? commandTimeout = null)
+    {
+        var result = await QueryAsync<T>(sql, param, commandTimeout);
+        return result.ToList();
+    }
+
+    public async Task<bool> ExistsAsync(string sql, object? param = null, int? commandTimeout = null)
+    {
+        var count = await QueryFirstOrDefaultAsIntAsync($"SELECT COUNT(*) FROM ({sql}) AS CountQuery", param, commandTimeout);
+        return count > 0;
+    }
+
+    public string GetConnectionString() => _options.ConfigConnectionString;
+
+    public int GetDefaultTimeout() => _options.DefaultCommandTimeout;
+
+    public void Dispose()
+    {
+        _logger.LogDebug("DatabaseService disposed");
+    }
+
+    /// <summary>
+    /// Ejecuta una consulta y retorna el primer resultado como int, 0 si es null
+    /// </summary>
+    public async Task<int> QuerySingleIntAsync(string sql, object? param = null, int? commandTimeout = null)
+    {
+        var result = await QueryFirstOrDefaultAsync<int?>(sql, param, commandTimeout);
+        return result ?? 0;
+    }
+
+    /// <summary>
+    /// Ejecuta una consulta y retorna el primer resultado como long, 0 si es null
+    /// </summary>
+    public async Task<long> QuerySingleLongAsync(string sql, object? param = null, int? commandTimeout = null)
+    {
+        var result = await QueryFirstOrDefaultAsync<long?>(sql, param, commandTimeout);
+        return result ?? 0L;
+    }
+}
+
+// =====================================================
+// OPCIONES DE CONFIGURACIÓN
+// =====================================================
+public class DatabaseOptions
+{
+    public string ConfigConnectionString { get; set; } = string.Empty;
+    public int DefaultCommandTimeout { get; set; } = 30;
+    public bool EnableRetry { get; set; } = true;
+    public int MaxRetryAttempts { get; set; } = 3;
+    public bool LogQueries { get; set; } = false;
+    public bool EnablePerformanceCounters { get; set; } = false;
+}// =====================================================
+// IAuditService - ACTUALIZADA para credenciales
+// =====================================================
+public interface IAuditService
+{
+    // M todos existentes actualizados (IdToken ? IdCredencial)
+    Task<List<AuditLog>> GetAuditLogsAsync(int? idAPI = null, DateTime? fechaDesde = null, DateTime? fechaHasta = null, int pageSize = 50, int pageNumber = 1);
+    Task<List<AuditLog>> GetRecentErrorsAsync(int count = 10);
+    Task<List<UsageStatistics>> GetUsageStatisticsAsync(int? idAPI = null, DateTime? fechaDesde = null, DateTime? fechaHasta = null);
+
+    // M TODO ACTUALIZADO: IdToken ? IdCredencial
+    Task LogAuditoriaAsync(int idAPI, int? idCredencial, string ambiente, string? parametrosEnviados, bool esExitoso, string? mensajeError, int tiempoEjecucionMs, string? direccionIP);
+
+    Task<long> GetTotalExecutionsAsync(DateTime? fechaDesde = null);
+    Task<double> GetAverageExecutionTimeAsync(int? idAPI = null, DateTime? fechaDesde = null);
+    Task<double> GetSuccessRateAsync(int? idAPI = null, DateTime? fechaDesde = null);
+
+    // NUEVOS M TODOS para an lisis por tipo de autenticaci n
+    Task<List<AuditLog>> GetAuditLogsByAuthTypeAsync(TipoAutenticacion tipoAuth, DateTime? fechaDesde = null, DateTime? fechaHasta = null);
+    Task<Dictionary<string, int>> GetExecutionsByAuthTypeAsync(DateTime? fechaDesde = null, DateTime? fechaHasta = null);
+    Task<List<AuditLog>> GetAuditLogsByCredentialAsync(int idCredencial, DateTime? fechaDesde = null, DateTime? fechaHasta = null);
+    Task<double> GetSuccessRateByAuthTypeAsync(TipoAutenticacion tipoAuth, DateTime? fechaDesde = null);
+}﻿
+// =====================================================
+// IAuthenticationService - NUEVA (reemplaza ITokenValidationService)
+// =====================================================
+public interface IAuthenticationService
+{
+    // Validación principal de autenticación
+    Task<AuthValidationResult> AuthenticateAsync(CredentialValidationRequest request);
+    Task<AuthValidationResult> ValidateTokenAsync(string token, int? idAPI = null);
+    Task<AuthValidationResult> ValidateApiKeyAsync(string apiKey, int? idAPI = null);
+    Task<AuthValidationResult> ValidateJWTAsync(string jwt, int idAPI);
+    Task<AuthValidationResult> ValidateOAuth2TokenAsync(string token, int idAPI);
+    Task<AuthValidationResult> ValidateNTLMAsync(string credentials, int idAPI);
+    Task<AuthValidationResult> ValidateBasicAuthAsync(string credentials, int idAPI);
+
+    // Rate limiting y control de acceso
+    Task<bool> CheckRateLimitAsync(int idCredencial, int idAPI);
+    Task<bool> IncrementRateLimitAsync(int idCredencial);
+    Task<Dictionary<int, int>> GetCurrentRateLimitsAsync(List<int> credencialIds);
+
+    // Configuración y metadatos
+    Task<ApiConfiguration?> GetAPIConfigForAuthAsync(int idAPI);
+    Task<bool> IsAPIPublicAsync(int idAPI); // Para APIs tipo NONE
+    Task<string> GetRequiredAuthTypeAsync(int idAPI);
+
+    // Auditoría de autenticación
+    Task LogAuthenticationAttemptAsync(int idAPI, int? idCredencial, bool isSuccessful, string? errorMessage, string? ipAddress);
+    Task<List<AuditLog>> GetFailedAuthAttemptsAsync(DateTime? fechaDesde = null, int count = 100);
+
+    // Estadísticas y monitoreo
+    Task<AuthStatsDto> GetAuthStatsAsync(int idAPI);
+    Task<List<ActivityDto>> GetRecentActivityAsync(int idAPI, int count = 10);
+    Task<SystemAuthHealthDto> GetSystemAuthHealthAsync();
+}
+// =====================================================
+// IConfigurationService - ACTUALIZADA
+// =====================================================
+public interface IConfigurationService
+{
+    // M todos existentes actualizados
+    Task<ApiConfiguration?> GetApiConfigurationAsync(int idApi, string? credential = null);
+    Task<List<ApiInfo>> GetAvailableApisAsync();
+
+    // NUEVOS M TODOS para sistema multi-auth
+    Task<ApiConfiguration?> GetApiConfigurationWithAuthAsync(int idApi, TipoAutenticacion tipoAuth, string? credential = null);
+    Task<List<TipoAutenticacionDto>> GetSupportedAuthTypesAsync();
+    Task<bool> ValidateAPIAuthConfigAsync(int idApi, TipoAutenticacion tipoAuth);
+    Task<string?> GetAuthConfigurationAsync(int idApi);
+}﻿// =====================================================
+// ICredencialService - NUEVA (reemplaza ITokenService)
+// =====================================================
+public interface ICredencialService
+{
+    // Gestión básica de credenciales
+    Task<List<CredencialAPIDto>> GetCredencialsByAPIAsync(int idAPI);
+    Task<CredencialAPIDto?> GetCredencialByIdAsync(int idCredencial);
+    Task<CredencialAPIDto?> GetCredencialByValueAsync(string valorCredencial);
+    Task<List<CredencialAPIDto>> GetAllCredencialesAsync();
+    Task<List<CredencialAPIDto>> GetCredencialesByTypeAsync(TipoAutenticacion tipoAuth);
+
+    // Creación y gestión de credenciales
+    Task<int> CreateCredencialAsync(CredencialAPIDto credencial);
+    Task<bool> UpdateCredencialAsync(CredencialAPIDto credencial);
+    Task<bool> DeleteCredencialAsync(int idCredencial);
+    Task<bool> ToggleCredencialStatusAsync(int idCredencial);
+
+    // Generación automática de credenciales
+    Task<string> GenerateTokenAsync(int idAPI, int diasExpiracion = 365, string? creadoPor = null);
+    Task<string> GenerateApiKeyAsync(int idAPI, int? diasExpiracion = null, string? creadoPor = null);
+    Task<CredencialAPIDto> CreateJWTCredentialAsync(int idAPI, string valorJWT, object? configuracion = null, int? diasExpiracion = null, string? creadoPor = null);
+
+    // Validación y autenticación
+    Task<AuthValidationResult> ValidateCredentialAsync(CredentialValidationRequest request);
+    Task<bool> ValidateCredentialSimpleAsync(string valorCredencial, int? idAPI = null);
+    Task<bool> CheckRateLimitAsync(int idCredencial);
+
+    // Gestión de expiración
+    Task<List<CredencialAPIDto>> GetExpiredCredentialsAsync();
+    Task<List<CredencialAPIDto>> GetCredentialsExpiringSoonAsync(int days = 7);
+    Task<int> CleanupExpiredCredentialsAsync();
+    Task<bool> RevokeCredentialAsync(int idCredencial);
+    Task<bool> ExtendCredentialExpirationAsync(int idCredencial, int additionalDays);
+
+    // Estadísticas y monitoreo
+    Task<int> GetActiveCredentialsCountAsync(int? idAPI = null);
+    Task<List<CredencialAPIDto>> GetCredentialsExceedingLimitAsync();
+    Task<Dictionary<TipoAutenticacion, int>> GetCredentialsByTypeStatsAsync();
+}﻿namespace DSDynamicAPI.Services
+{
+    public interface IDatabaseService
+    {
+        public Task<int> QuerySingleIntAsync(string sql, object? param = null, int? commandTimeout = null);
+        public Task<long> QuerySingleLongAsync(string sql, object? param = null, int? commandTimeout = null);
+    }
+}
+
+// =====================================================
+// ISqlExecutionService - SIN CAMBIOS MAYORES
+// =====================================================
+public interface ISqlExecutionService
+{
+    Task<object?> ExecuteSqlAsync(ApiConfiguration config, Dictionary<string, object?> parameters, string environment);
+
+    // NUEVO: M todo con contexto de autenticaci n
+    Task<object?> ExecuteSqlWithAuthContextAsync(ApiConfiguration config, Dictionary<string, object?> parameters, string environment, AuthValidationResult authContext);
+}﻿
+// =====================================================
+// ITipoAutenticacionService - YA DEFINIDA (mantenemos)
+// =====================================================
+public interface ITipoAutenticacionService
+{
+    // Gestión de tipos de autenticación
+    Task<List<TipoAutenticacionDto>> GetAllTiposAsync();
+    Task<List<TipoAutenticacionDto>> GetActiveTiposAsync();
+    Task<TipoAutenticacionDto?> GetTipoByIdAsync(int idTipoAuth);
+    Task<TipoAutenticacionDto?> GetTipoByCodigoAsync(string codigo);
+
+    // Validación de configuraciones
+    Task<bool> ValidateConfigurationAsync(TipoAutenticacion tipo, string? configuracion);
+    Task<string?> GetDefaultConfigurationAsync(TipoAutenticacion tipo);
+    Task<bool> RequiresConfigurationAsync(TipoAutenticacion tipo);
+
+    // Métodos de configuración específicos por tipo
+    Task<bool> ValidateJWTConfigurationAsync(string configuracion);
+    Task<bool> ValidateOAuth2ConfigurationAsync(string configuracion);
+    Task<bool> ValidateNTLMConfigurationAsync(string configuracion);
+    Task<bool> ValidateBasicAuthConfigurationAsync(string configuracion);
+
+    // Schemas para validación en frontend
+    Task<string?> GetConfigurationSchemaAsync(TipoAutenticacion tipo);
+}// Interfaz para validaci n de tokens
+public interface ITokenValidationService
+{
+    Task<TokenValidationResult> ValidateTokenAsync(string token);
+}// =====================================================
+// SqlExecutionService - IMPLEMENTACI N ACTUALIZADA
+// =====================================================
+
+using Dapper;
+using DSDynamicAPI.Services;
+using DynamicAPIs.Services.Database;
+using Microsoft.Data.SqlClient;
+using System.Data;
+
+namespace DynamicAPIs.Services.Implementation;
+
+public class SqlExecutionService : ISqlExecutionService
+{
+    private readonly DatabaseService _dbService;
+    private readonly ILogger<SqlExecutionService> _logger;
+
+    public SqlExecutionService(DatabaseService dbService, ILogger<SqlExecutionService> logger)
+    {
+        _dbService = dbService;
+        _logger = logger;
+    }
+
+    // =====================================================
+    // M TODO PRINCIPAL DE EJECUCI N
+    // =====================================================
+
+    public async Task<object?> ExecuteSqlAsync(ApiConfiguration config, Dictionary<string, object?> parameters, string environment)
+    {
+        var connectionString = environment.ToUpper() == "TEST"
+            ? config.StringConexionTest
+            : config.StringConexionProduccion;
+
+        if (string.IsNullOrEmpty(connectionString))
+        {
+            throw new InvalidOperationException($"String de conexi n no configurado para ambiente {environment}");
+        }
+
+        try
+        {
+            _logger.LogInformation("Ejecutando {TipoObjeto} {ObjetoSQL} en ambiente {Environment} para API {IdAPI}",
+                config.TipoObjeto, config.ObjetoSQL, environment, config.IdAPI);
+
+            using var connection = new SqlConnection(connectionString);
+            await connection.OpenAsync();
+
+            var validatedParams = ValidateAndConvertParameters(config.Parametros, parameters);
+
+            return config.TipoObjeto.ToUpper() switch
+            {
+                "PROCEDURE" => await ExecuteStoredProcedureAsync(connection, config, validatedParams),
+                "FUNCTION" => await ExecuteFunctionAsync(connection, config, validatedParams),
+                "VIEW" => await ExecuteViewAsync(connection, config, validatedParams),
+                _ => throw new NotSupportedException($"Tipo de objeto SQL no soportado: {config.TipoObjeto}")
+            };
+        }
+        catch (SqlException ex)
+        {
+            _logger.LogError(ex, "Error SQL ejecutando {TipoObjeto} {ObjetoSQL} para API {IdAPI}: {ErrorMessage}",
+                config.TipoObjeto, config.ObjetoSQL, config.IdAPI, ex.Message);
+
+            throw new InvalidOperationException($"Error de base de datos: {GetFriendlyErrorMessage(ex)}", ex);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error inesperado ejecutando {TipoObjeto} {ObjetoSQL} para API {IdAPI}",
+                config.TipoObjeto, config.ObjetoSQL, config.IdAPI);
+            throw;
+        }
+    }
+
+    // =====================================================
+    // NUEVO M TODO CON CONTEXTO DE AUTENTICACI N
+    // =====================================================
+
+    public async Task<object?> ExecuteSqlWithAuthContextAsync(ApiConfiguration config, Dictionary<string, object?> parameters, string environment, AuthValidationResult authContext)
+    {
+        // Agregar metadatos de autenticaci n a los par metros si es necesario
+        var enrichedParameters = new Dictionary<string, object?>(parameters);
+
+        // Agregar informaci n de contexto de autenticaci n
+        if (authContext.IdCredencial.HasValue)
+        {
+            enrichedParameters["@_AuthCredentialId"] = authContext.IdCredencial.Value;
+        }
+
+        enrichedParameters["@_AuthType"] = authContext.TipoAuth;
+        enrichedParameters["@_ExecutionContext"] = environment;
+
+        // Agregar metadatos adicionales si est n disponibles
+        if (authContext.AuthMetadata?.Any() == true)
+        {
+            foreach (var metadata in authContext.AuthMetadata)
+            {
+                var key = $"@_Auth{metadata.Key}";
+                if (!enrichedParameters.ContainsKey(key))
+                {
+                    enrichedParameters[key] = metadata.Value;
+                }
+            }
+        }
+
+        _logger.LogDebug("Ejecutando SQL con contexto de autenticaci n: {TipoAuth}, Credencial: {IdCredencial}",
+            authContext.TipoAuth, authContext.IdCredencial);
+
+        return await ExecuteSqlAsync(config, enrichedParameters, environment);
+    }
+
+    // =====================================================
+    // EJECUCI N DE STORED PROCEDURES
+    // =====================================================
+
+    private async Task<object?> ExecuteStoredProcedureAsync(SqlConnection connection, ApiConfiguration config, DynamicParameters parameters)
+    {
+        try
+        {
+            var stopwatch = System.Diagnostics.Stopwatch.StartNew();
+
+            var result = await connection.QueryAsync(config.ObjetoSQL, parameters,
+                commandType: CommandType.StoredProcedure,
+                commandTimeout: config.TimeoutEjecucionSegundos);
+
+            stopwatch.Stop();
+
+            _logger.LogInformation("Stored procedure {ProcedureName} ejecutado exitosamente en {ElapsedMs}ms, {RowCount} filas retornadas",
+                config.ObjetoSQL, stopwatch.ElapsedMilliseconds, result.Count());
+
+            return ProcessResult(result);
+        }
+        catch (SqlException ex) when (ex.Number == 2) // Timeout
+        {
+            _logger.LogWarning("Timeout ejecutando stored procedure {ProcedureName} despu s de {Timeout}s",
+                config.ObjetoSQL, config.TimeoutEjecucionSegundos);
+
+            throw new TimeoutException($"La ejecuci n del procedimiento {config.ObjetoSQL} excedi  el tiempo l mite de {config.TimeoutEjecucionSegundos} segundos");
+        }
+        catch (SqlException ex) when (ex.Number == 2812) // Procedure not found
+        {
+            _logger.LogError("Stored procedure {ProcedureName} no encontrado", config.ObjetoSQL);
+            throw new InvalidOperationException($"El procedimiento almacenado '{config.ObjetoSQL}' no existe");
+        }
+        catch (SqlException ex) when (ex.Number == 201 || ex.Number == 8144) // Parameter errors
+        {
+            _logger.LogError("Error de par metros en stored procedure {ProcedureName}: {ErrorMessage}",
+                config.ObjetoSQL, ex.Message);
+
+            throw new ArgumentException($"Error en los par metros del procedimiento: {ex.Message}");
+        }
+    }
+
+    // =====================================================
+    // EJECUCI N DE FUNCIONES
+    // =====================================================
+
+    private async Task<object?> ExecuteFunctionAsync(SqlConnection connection, ApiConfiguration config, DynamicParameters parameters)
+    {
+        try
+        {
+            var stopwatch = System.Diagnostics.Stopwatch.StartNew();
+
+            // Para funciones escalares
+            if (await IsFunctionScalar(connection, config.ObjetoSQL))
+            {
+                var functionCall = BuildScalarFunctionCall(config.ObjetoSQL, parameters);
+                var result = await connection.QueryFirstOrDefaultAsync<object>(functionCall, parameters,
+                    commandTimeout: config.TimeoutEjecucionSegundos);
+
+                stopwatch.Stop();
+                _logger.LogInformation("Funci n escalar {FunctionName} ejecutada en {ElapsedMs}ms",
+                    config.ObjetoSQL, stopwatch.ElapsedMilliseconds);
+
+                return result;
+            }
+            // Para funciones de tabla
+            else
+            {
+                var functionCall = BuildTableFunctionCall(config.ObjetoSQL, parameters);
+                var result = await connection.QueryAsync(functionCall, parameters,
+                    commandTimeout: config.TimeoutEjecucionSegundos);
+
+                stopwatch.Stop();
+                _logger.LogInformation("Funci n de tabla {FunctionName} ejecutada en {ElapsedMs}ms, {RowCount} filas retornadas",
+                    config.ObjetoSQL, stopwatch.ElapsedMilliseconds, result.Count());
+
+                return ProcessResult(result);
+            }
+        }
+        catch (SqlException ex) when (ex.Number == 2812) // Function not found
+        {
+            _logger.LogError("Funci n {FunctionName} no encontrada", config.ObjetoSQL);
+            throw new InvalidOperationException($"La funci n '{config.ObjetoSQL}' no existe");
+        }
+    }
+
+    // =====================================================
+    // EJECUCI N DE VISTAS
+    // =====================================================
+
+    private async Task<object?> ExecuteViewAsync(SqlConnection connection, ApiConfiguration config, DynamicParameters parameters)
+    {
+        try
+        {
+            var stopwatch = System.Diagnostics.Stopwatch.StartNew();
+
+            var query = BuildViewQuery(config.ObjetoSQL, parameters);
+            var result = await connection.QueryAsync(query, parameters,
+                commandTimeout: config.TimeoutEjecucionSegundos);
+
+            stopwatch.Stop();
+
+            _logger.LogInformation("Vista {ViewName} consultada exitosamente en {ElapsedMs}ms, {RowCount} filas retornadas",
+                config.ObjetoSQL, stopwatch.ElapsedMilliseconds, result.Count());
+
+            return ProcessResult(result);
+        }
+        catch (SqlException ex) when (ex.Number == 208) // Object not found
+        {
+            _logger.LogError("Vista {ViewName} no encontrada", config.ObjetoSQL);
+            throw new InvalidOperationException($"La vista '{config.ObjetoSQL}' no existe");
+        }
+    }
+
+    // =====================================================
+    // VALIDACI N Y CONVERSI N DE PAR METROS
+    // =====================================================
+
+    private DynamicParameters ValidateAndConvertParameters(List<ApiParameter> configParams, Dictionary<string, object?> providedParams)
+    {
+        var dynamicParams = new DynamicParameters();
+
+        foreach (var configParam in configParams)
+        {
+            var paramName = configParam.NombreParametro.StartsWith("@")
+                ? configParam.NombreParametro
+                : "@" + configParam.NombreParametro;
+
+            object? value = null;
+
+            // Buscar el valor en los par metros proporcionados (con o sin @)
+            if (providedParams.TryGetValue(configParam.NombreParametro, out value) ||
+                providedParams.TryGetValue(paramName, out value))
+            {
+                // Convertir el valor al tipo correcto
+                value = ConvertParameterValue(value, configParam.TipoParametro);
+            }
+            else if (!string.IsNullOrEmpty(configParam.ValorPorDefecto))
+            {
+                // Usar valor por defecto
+                value = ConvertParameterValue(configParam.ValorPorDefecto, configParam.TipoParametro);
+            }
+            else if (configParam.EsObligatorio)
+            {
+                throw new ArgumentException($"Par metro obligatorio '{configParam.NombreParametro}' no proporcionado");
+            }
+
+            // Agregar el par metro con el tipo SQL correcto
+            var dbType = GetDbType(configParam.TipoParametro);
+            dynamicParams.Add(paramName, value, dbType);
+
+            _logger.LogDebug("Par metro agregado: {ParamName} = {Value} (Tipo: {DbType})",
+                paramName, value ?? "NULL", dbType);
+        }
+
+        return dynamicParams;
+    }
+
+    private object? ConvertParameterValue(object? value, string targetType)
+    {
+        if (value == null || value == DBNull.Value)
+            return null;
+
+        var stringValue = value.ToString();
+        if (string.IsNullOrEmpty(stringValue))
+            return null;
+
+        try
+        {
+            return targetType.ToUpper() switch
+            {
+                "INT" or "INTEGER" => int.Parse(stringValue),
+                "BIGINT" => long.Parse(stringValue),
+                "DECIMAL" or "NUMERIC" => decimal.Parse(stringValue),
+                "FLOAT" or "REAL" => float.Parse(stringValue),
+                "DOUBLE" => double.Parse(stringValue),
+                "DATETIME" or "DATETIME2" or "SMALLDATETIME" => DateTime.Parse(stringValue),
+                "DATE" => DateOnly.Parse(stringValue),
+                "TIME" => TimeOnly.Parse(stringValue),
+                "BIT" or "BOOLEAN" => bool.Parse(stringValue),
+                "UNIQUEIDENTIFIER" => Guid.Parse(stringValue),
+                _ => stringValue // Default para strings y tipos no reconocidos
+            };
+        }
+        catch (FormatException)
+        {
+            throw new ArgumentException($"El valor '{stringValue}' no puede ser convertido al tipo {targetType}");
+        }
+    }
+
+    private DbType GetDbType(string sqlType)
+    {
+        return sqlType.ToUpper() switch
+        {
+            "INT" or "INTEGER" => DbType.Int32,
+            "BIGINT" => DbType.Int64,
+            "SMALLINT" => DbType.Int16,
+            "TINYINT" => DbType.Byte,
+            "DECIMAL" or "NUMERIC" => DbType.Decimal,
+            "FLOAT" => DbType.Double,
+            "REAL" => DbType.Single,
+            "MONEY" or "SMALLMONEY" => DbType.Currency,
+            "DATETIME" or "DATETIME2" => DbType.DateTime,
+            "SMALLDATETIME" => DbType.DateTime,
+            "DATE" => DbType.Date,
+            "TIME" => DbType.Time,
+            "BIT" => DbType.Boolean,
+            "UNIQUEIDENTIFIER" => DbType.Guid,
+            "NVARCHAR" or "NCHAR" or "NTEXT" => DbType.String,
+            "VARCHAR" or "CHAR" or "TEXT" => DbType.AnsiString,
+            "BINARY" or "VARBINARY" or "IMAGE" => DbType.Binary,
+            _ => DbType.String
+        };
+    }
+
+    // =====================================================
+    // M TODOS AUXILIARES
+    // =====================================================
+
+    private async Task<bool> IsFunctionScalar(SqlConnection connection, string functionName)
+    {
+        const string sql = @"
+            SELECT DATA_TYPE
+            FROM INFORMATION_SCHEMA.ROUTINES
+            WHERE ROUTINE_NAME = @FunctionName AND ROUTINE_TYPE = 'FUNCTION'";
+
+        var dataType = await connection.QueryFirstOrDefaultAsync<string>(sql, new { FunctionName = functionName });
+
+        // Si retorna TABLE, es funci n de tabla; cualquier otro tipo es escalar
+        return !string.Equals(dataType, "TABLE", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private string BuildScalarFunctionCall(string functionName, DynamicParameters parameters)
+    {
+        var paramNames = string.Join(", ", parameters.ParameterNames.Select(p => p));
+        return $"SELECT dbo.{functionName}({paramNames}) AS Result";
+    }
+
+    private string BuildTableFunctionCall(string functionName, DynamicParameters parameters)
+    {
+        var paramNames = string.Join(", ", parameters.ParameterNames.Select(p => p));
+        return $"SELECT * FROM dbo.{functionName}({paramNames})";
+    }
+
+    private string BuildViewQuery(string viewName, DynamicParameters parameters)
+    {
+        var query = $"SELECT * FROM {viewName}";
+
+        // Si hay par metros, construir WHERE clause
+        if (parameters.ParameterNames.Any())
+        {
+            var whereConditions = parameters.ParameterNames.Select(param =>
+            {
+                var columnName = param.StartsWith("@") ? param[1..] : param;
+                return $"{columnName} = {param}";
+            });
+
+            query += " WHERE " + string.Join(" AND ", whereConditions);
+        }
+
+        return query;
+    }
+
+    private object ProcessResult(IEnumerable<dynamic> result)
+    {
+        var resultList = result.ToList();
+
+        if (!resultList.Any())
+        {
+            return new { Message = "No se encontraron datos", Count = 0 };
+        }
+
+        // Si es un solo resultado, retornar el objeto directamente
+        if (resultList.Count == 1)
+        {
+            return resultList.First();
+        }
+
+        // Si son m ltiples resultados, retornar como array
+        return resultList;
+    }
+
+    private string GetFriendlyErrorMessage(SqlException ex)
+    {
+        return ex.Number switch
+        {
+            2 => "Tiempo de espera agotado. La consulta tard  demasiado en ejecutarse.",
+            18 => "Error de sintaxis en la consulta SQL.",
+            102 => "Sintaxis incorrecta cerca de un token.",
+            208 => "El objeto especificado no existe en la base de datos.",
+            229 => "Permisos insuficientes para ejecutar la operaci n.",
+            515 => "No se puede insertar NULL en una columna que no permite valores nulos.",
+            547 => "Violaci n de restricci n de clave for nea.",
+            2812 => "El procedimiento almacenado especificado no existe.",
+            8144 => "El procedimiento tiene demasiados argumentos especificados.",
+            _ => $"Error SQL #{ex.Number}: {ex.Message}"
+        };
+    }
+
+    // =====================================================
+    // M TODOS DE DIAGN STICO Y MONITOREO
+    // =====================================================
+
+    public async Task<bool> TestConnectionAsync(string connectionString)
+    {
+        try
+        {
+            using var connection = new SqlConnection(connectionString);
+            await connection.OpenAsync();
+            await connection.QueryAsync("SELECT 1");
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error probando conexi n: {ConnectionString}",
+                MaskConnectionString(connectionString));
+            return false;
+        }
+    }
+
+    public async Task<object> GetDatabaseInfoAsync(string connectionString)
+    {
+        try
+        {
+            using var connection = new SqlConnection(connectionString);
+            await connection.OpenAsync();
+
+            const string sql = @"
+                SELECT 
+                    @@SERVERNAME as ServerName,
+                    DB_NAME() as DatabaseName,
+                    @@VERSION as Version,
+                    GETDATE() as CurrentTime,
+                    @@SPID as ProcessId";
+
+            var info = await connection.QueryFirstOrDefaultAsync(sql);
+            return info ?? new { Error = "No se pudo obtener informaci n de la base de datos" };
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error obteniendo informaci n de base de datos");
+            return new { Error = ex.Message };
+        }
+    }
+
+    private string MaskConnectionString(string connectionString)
+    {
+        // Enmascarar passwords en connection strings para logging seguro
+        return System.Text.RegularExpressions.Regex.Replace(
+            connectionString,
+            @"(Password|Pwd)\s*=\s*[^;]+",
+            "$1=***",
+            System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+    }
+}// Servicio de validaci n de tokens
+using Dapper;
+using Microsoft.Data.SqlClient;
+using Microsoft.Extensions.Options;
+using System.Data;
+
+public class TokenValidationService : ITokenValidationService
+{
+    private readonly DatabaseOptions _dbOptions;
+    private readonly ILogger<TokenValidationService> _logger;
+
+    public TokenValidationService(IOptions<DatabaseOptions> dbOptions, ILogger<TokenValidationService> logger)
+    {
+        _dbOptions = dbOptions.Value;
+        _logger = logger;
+    }
+
+    public async Task<TokenValidationResult> ValidateTokenAsync(string token)
+    {
+        try
+        {
+            using var connection = new SqlConnection(_dbOptions.ConfigConnectionString);
+
+            var parameters = new DynamicParameters();
+            parameters.Add("@TokenValue", token);
+            parameters.Add("@IdAPI", dbType: DbType.Int32, direction: ParameterDirection.Output);
+            parameters.Add("@IsValid", dbType: DbType.Boolean, direction: ParameterDirection.Output);
+            parameters.Add("@RateLimitExceeded", dbType: DbType.Boolean, direction: ParameterDirection.Output);
+
+            await connection.ExecuteAsync("sp_ValidateTokenAndRateLimit", parameters,
+                commandType: CommandType.StoredProcedure, commandTimeout: _dbOptions.DefaultCommandTimeout);
+
+            return new TokenValidationResult
+            {
+                IdAPI = parameters.Get<int>("@IdAPI"),
+                IsValid = parameters.Get<bool>("@IsValid"),
+                RateLimitExceeded = parameters.Get<bool>("@RateLimitExceeded"),
+                ErrorMessage = parameters.Get<bool>("@RateLimitExceeded") ? "Rate limit exceeded" : null
+            };
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error validando token");
+            return new TokenValidationResult
+            {
+                IsValid = false,
+                ErrorMessage = "Error interno validando token"
+            };
+        }
+    }
+}

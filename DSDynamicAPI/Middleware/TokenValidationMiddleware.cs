@@ -53,9 +53,9 @@ public class TokenValidationMiddleware
             // Agregar información del token al contexto
             if (context.Items["RequestContext"] is RequestContext requestContext)
             {
-                requestContext.Token = token;
+                requestContext.Credential = token;
                 requestContext.IdAPI = validationResult.IdAPI;
-                requestContext.IdToken = validationResult.IdToken;
+                requestContext.IdCredencial = validationResult.IdToken;
             }
 
             await _next(context);

@@ -1,0 +1,864 @@
+﻿
+// =====================================================
+// AuthenticationController - NUEVO CONTROLLER PARA GESTIÓN DE AUTH
+// =====================================================
+using Microsoft.AspNetCore.Mvc;
+
+[ApiController]
+[Route("api/auth")]
+[Produces("application/json")]
+public class AuthenticationController : ControllerBase
+{
+    private readonly IAuthenticationService _authService;
+    private readonly ITipoAutenticacionService _tipoAuthService;
+    private readonly ICredencialService _credencialService;
+    private readonly ILogger<AuthenticationController> _logger;
+
+    public AuthenticationController(
+        IAuthenticationService authService,
+        ITipoAutenticacionService tipoAuthService,
+        ICredencialService credencialService,
+        ILogger<AuthenticationController> logger)
+    {
+        _authService = authService;
+        _tipoAuthService = tipoAuthService;
+        _credencialService = credencialService;
+        _logger = logger;
+    }
+
+    /// <summary>
+    /// Obtiene los tipos de autenticación disponibles
+    /// </summary>
+    [HttpGet("types")]
+    [ProducesResponseType(typeof(List<TipoAutenticacionDto>), 200)]
+    public async Task<IActionResult> GetAuthTypes()
+    {
+        try
+        {
+            var tipos = await _tipoAuthService.GetActiveTiposAsync();
+            return Ok(new
+            {
+                Success = true,
+                Count = tipos.Count,
+                AuthTypes = tipos.Select(t => new
+                {
+                    t.IdTipoAuth,
+                    t.Codigo,
+                    t.Nombre,
+                    t.Descripcion,
+                    t.RequiereConfiguracion,
+                    HeaderExample = GetAuthHeaderExample(t.Codigo)
+                })
+            });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error obteniendo tipos de autenticación");
+            return StatusCode(500, new ErrorResponse
+            {
+                Error = "INTERNAL_ERROR",
+                Message = "Error obteniendo tipos de autenticación",
+                StatusCode = 500
+            });
+        }
+    }
+
+    /// <summary>
+    /// Valida una credencial específica
+    /// </summary>
+    [HttpPost("validate")]
+    [ProducesResponseType(typeof(object), 200)]
+    [ProducesResponseType(typeof(ErrorResponse), 400)]
+    public async Task<IActionResult> ValidateCredential([FromBody] CredentialValidationRequest request)
+    {
+        try
+        {
+            if (request.IdAPI <= 0)
+            {
+                return BadRequest(new ErrorResponse
+                {
+                    Error = "INVALID_REQUEST",
+                    Message = "IdAPI es requerido",
+                    StatusCode = 400
+                });
+            }
+
+            var result = await _authService.AuthenticateAsync(request);
+
+            return Ok(new
+            {
+                Success = result.IsValid,
+                result.TipoAuth,
+                result.RateLimitExceeded,
+                result.RemainingRequests,
+                ErrorMessage = result.ErrorMessage,
+                Metadata = result.AuthMetadata
+            });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error validando credencial para API {IdAPI}", request.IdAPI);
+            return StatusCode(500, new ErrorResponse
+            {
+                Error = "INTERNAL_ERROR",
+                Message = "Error validando credencial",
+                StatusCode = 500
+            });
+        }
+    }
+
+    /// <summary>
+    /// Obtiene estadísticas del sistema de autenticación
+    /// </summary>
+    [HttpGet("health")]
+    [ProducesResponseType(typeof(SystemAuthHealthDto), 200)]
+    public async Task<IActionResult> GetAuthHealth()
+    {
+        try
+        {
+            var health = await _authService.GetSystemAuthHealthAsync();
+            return Ok(health);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error obteniendo salud del sistema de autenticación");
+            return StatusCode(500, new ErrorResponse
+            {
+                Error = "INTERNAL_ERROR",
+                Message = "Error obteniendo estado del sistema",
+                StatusCode = 500
+            });
+        }
+    }
+
+    private string GetAuthHeaderExample(string authType)
+    {
+        return authType switch
+        {
+            "TOKEN" => "X-API-Token: your_token_here",
+            "APIKEY" => "X-API-Key: your_api_key_here",
+            "JWT" => "Authorization: Bearer your_jwt_token_here",
+            "OAUTH2" => "Authorization: Bearer your_oauth2_token_here",
+            "NTLM" => "Authorization: NTLM your_ntlm_token_here",
+            "BASIC" => "Authorization: Basic base64(username:password)",
+            "NONE" => "No authentication required",
+            _ => "See API documentation"
+        };
+    }
+}
+using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.RateLimiting;
+using System.Diagnostics;
+
+namespace DynamicAPIs.Controllers;
+
+// =====================================================
+// DynamicApiController - CONTROLLER PRINCIPAL ACTUALIZADO
+// =====================================================
+[ApiController]
+[Route("api")]
+[Produces("application/json")]
+public class DynamicApiController : ControllerBase
+{
+    private readonly IConfigurationService _configService;
+    private readonly ISqlExecutionService _sqlService;
+    private readonly IAuditService _auditService;
+    private readonly IAuthenticationService _authService;
+    private readonly ILogger<DynamicApiController> _logger;
+
+    public DynamicApiController(
+        IConfigurationService configService,
+        ISqlExecutionService sqlService,
+        IAuditService auditService,
+        IAuthenticationService authService,
+        ILogger<DynamicApiController> logger)
+    {
+        _configService = configService;
+        _sqlService = sqlService;
+        _auditService = auditService;
+        _authService = authService;
+        _logger = logger;
+    }
+
+    /// <summary>
+    /// Ejecuta una API din mica basada en su configuraci n
+    /// </summary>
+    /// <param name="idApi">ID de la API a ejecutar</param>
+    /// <param name="environment">Ambiente (TEST/PRODUCTION)</param>
+    /// <returns>Resultado de la ejecuci n</returns>
+    [HttpGet("execute")]
+    [EnableRateLimiting("DynamicAuthPolicy")]
+    [ProducesResponseType(typeof(ApiExecutionResponse), 200)]
+    [ProducesResponseType(typeof(ErrorResponse), 400)]
+    [ProducesResponseType(typeof(ErrorResponse), 401)]
+    [ProducesResponseType(typeof(ErrorResponse), 404)]
+    [ProducesResponseType(typeof(ErrorResponse), 429)]
+    [ProducesResponseType(typeof(ErrorResponse), 500)]
+    public async Task<IActionResult> ExecuteApi(
+        [FromQuery] int idApi,
+        [FromQuery] string environment = "PRODUCTION")
+    {
+        var stopwatch = Stopwatch.StartNew();
+        var requestContext = HttpContext.Items["RequestContext"] as RequestContext;
+        var success = false;
+        string? errorMessage = null;
+
+        try
+        {
+            _logger.LogInformation("Ejecutando API {IdAPI} en ambiente {Environment}", idApi, environment);
+
+            // Validar ambiente
+            if (!IsValidEnvironment(environment))
+            {
+                return BadRequest(new ErrorResponse
+                {
+                    Error = "INVALID_ENVIRONMENT",
+                    Message = "Ambiente debe ser TEST o PRODUCTION",
+                    StatusCode = 400,
+                    RequestId = requestContext?.RequestId ?? Guid.NewGuid().ToString()
+                });
+            }
+
+            // El middleware ya valid  la autenticaci n, ahora obtenemos la configuraci n
+            var config = await _configService.GetApiConfigurationAsync(idApi, requestContext?.Credential);
+            if (config == null)
+            {
+                return NotFound(new ErrorResponse
+                {
+                    Error = "API_NOT_FOUND",
+                    Message = $"API con ID {idApi} no encontrada o acceso denegado",
+                    StatusCode = 404,
+                    RequestId = requestContext?.RequestId ?? Guid.NewGuid().ToString()
+                });
+            }
+
+            // Extraer y validar par metros
+            var parameters = ExtractParameters(HttpContext.Request, config.Parametros);
+            var validationResult = ValidateParameters(parameters, config.Parametros);
+
+            if (!validationResult.IsValid)
+            {
+                return BadRequest(new ErrorResponse
+                {
+                    Error = "INVALID_PARAMETERS",
+                    Message = validationResult.ErrorMessage!,
+                    StatusCode = 400,
+                    RequestId = requestContext?.RequestId ?? Guid.NewGuid().ToString()
+                });
+            }
+
+            // Ejecutar funci n SQL
+            var result = await _sqlService.ExecuteSqlAsync(config, parameters, environment);
+            success = true;
+
+            var response = new ApiExecutionResponse
+            {
+                Success = true,
+                Data = result,
+                ExecutionTimeMs = (int)stopwatch.ElapsedMilliseconds,
+                RequestId = requestContext?.RequestId ?? Guid.NewGuid().ToString(),
+                Timestamp = DateTime.UtcNow
+            };
+
+            _logger.LogInformation("API {IdAPI} ejecutada exitosamente en {ElapsedMs}ms",
+                idApi, stopwatch.ElapsedMilliseconds);
+
+            return Ok(response);
+        }
+        catch (ArgumentException ex)
+        {
+            errorMessage = ex.Message;
+            _logger.LogWarning("Error de argumentos en API {IdAPI}: {Error}", idApi, ex.Message);
+
+            return BadRequest(new ErrorResponse
+            {
+                Error = "INVALID_ARGUMENT",
+                Message = ex.Message,
+                StatusCode = 400,
+                RequestId = requestContext?.RequestId ?? Guid.NewGuid().ToString()
+            });
+        }
+        catch (InvalidOperationException ex)
+        {
+            errorMessage = ex.Message;
+            _logger.LogWarning("Error de operaci n en API {IdAPI}: {Error}", idApi, ex.Message);
+
+            return BadRequest(new ErrorResponse
+            {
+                Error = "INVALID_OPERATION",
+                Message = ex.Message,
+                StatusCode = 400,
+                RequestId = requestContext?.RequestId ?? Guid.NewGuid().ToString()
+            });
+        }
+        catch (TimeoutException ex)
+        {
+            errorMessage = "Timeout en la ejecuci n de la API";
+            _logger.LogError(ex, "Timeout ejecutando API {IdAPI}", idApi);
+
+            return StatusCode(408, new ErrorResponse
+            {
+                Error = "TIMEOUT",
+                Message = "La ejecuci n de la API excedi  el tiempo l mite",
+                StatusCode = 408,
+                RequestId = requestContext?.RequestId ?? Guid.NewGuid().ToString()
+            });
+        }
+        catch (Exception ex)
+        {
+            errorMessage = ex.Message;
+            _logger.LogError(ex, "Error inesperado ejecutando API {IdAPI}", idApi);
+
+            return StatusCode(500, new ErrorResponse
+            {
+                Error = "INTERNAL_ERROR",
+                Message = "Error interno ejecutando la API",
+                StatusCode = 500,
+                RequestId = requestContext?.RequestId ?? Guid.NewGuid().ToString()
+            });
+        }
+        finally
+        {
+            stopwatch.Stop();
+        }
+    }
+
+    /// <summary>
+    /// Obtiene informaci n detallada de una API espec fica
+    /// </summary>
+    [HttpGet("info/{idApi}")]
+    [ProducesResponseType(typeof(ApiInfo), 200)]
+    [ProducesResponseType(typeof(ErrorResponse), 404)]
+    public async Task<IActionResult> GetApiInfo(int idApi)
+    {
+        try
+        {
+            var config = await _configService.GetApiConfigurationAsync(idApi);
+            if (config == null)
+            {
+                return NotFound(new ErrorResponse
+                {
+                    Error = "API_NOT_FOUND",
+                    Message = $"API con ID {idApi} no encontrada",
+                    StatusCode = 404
+                });
+            }
+
+            var apiInfo = new ApiInfo
+            {
+                IdAPI = config.IdAPI,
+                NombreAPI = config.NombreAPI,
+                Descripcion = config.Descripcion,
+                TipoObjeto = config.TipoObjeto,
+                Parametros = config.Parametros.Select(p => new ParameterInfo
+                {
+                    Nombre = p.NombreParametro,
+                    Tipo = p.TipoParametro,
+                    Requerido = p.EsObligatorio,
+                    ValorPorDefecto = p.ValorPorDefecto,
+                    Descripcion = p.Descripcion
+                }).ToList(),
+                Endpoint = $"/api/execute?idApi={idApi}",
+                ExampleCall = GenerateExampleCall(idApi, config.Parametros)
+            };
+
+            return Ok(apiInfo);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error obteniendo informaci n de API {IdAPI}", idApi);
+            return StatusCode(500, new ErrorResponse
+            {
+                Error = "INTERNAL_ERROR",
+                Message = "Error obteniendo informaci n de la API",
+                StatusCode = 500
+            });
+        }
+    }
+
+    /// <summary>
+    /// Obtiene estad sticas de uso de una API espec fica
+    /// </summary>
+    [HttpGet("stats/{idApi}")]
+    [ProducesResponseType(typeof(object), 200)]
+    [ProducesResponseType(typeof(ErrorResponse), 404)]
+    public async Task<IActionResult> GetApiStats(int idApi, [FromQuery] DateTime? fechaDesde = null, [FromQuery] DateTime? fechaHasta = null)
+    {
+        try
+        {
+            // Verificar que la API existe
+            var config = await _configService.GetApiConfigurationAsync(idApi);
+            if (config == null)
+            {
+                return NotFound(new ErrorResponse
+                {
+                    Error = "API_NOT_FOUND",
+                    Message = $"API con ID {idApi} no encontrada",
+                    StatusCode = 404
+                });
+            }
+
+            // Obtener estad sticas
+            var usageStats = await _auditService.GetUsageStatisticsAsync(idApi, fechaDesde, fechaHasta);
+            var authStats = await _authService.GetAuthStatsAsync(idApi);
+            var recentActivity = await _authService.GetRecentActivityAsync(idApi, 10);
+
+            var stats = new
+            {
+                API = new
+                {
+                    config.IdAPI,
+                    config.NombreAPI,
+                    TipoAuth = authStats.TipoAuth.ToString(),
+                    NombreTipoAuth = authStats.NombreTipoAuth
+                },
+                Usage = usageStats.FirstOrDefault(),
+                Authentication = authStats,
+                RecentActivity = recentActivity,
+                Period = new
+                {
+                    From = fechaDesde?.ToString("yyyy-MM-dd") ?? "30 d as atr s",
+                    To = fechaHasta?.ToString("yyyy-MM-dd") ?? "hoy"
+                }
+            };
+
+            return Ok(stats);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error obteniendo estad sticas de API {IdAPI}", idApi);
+            return StatusCode(500, new ErrorResponse
+            {
+                Error = "INTERNAL_ERROR",
+                Message = "Error obteniendo estad sticas de la API",
+                StatusCode = 500
+            });
+        }
+    }
+
+    // =====================================================
+    // M TODOS AUXILIARES
+    // =====================================================
+
+    private bool IsValidEnvironment(string environment)
+    {
+        var validEnvironments = new[] { "TEST", "PRODUCTION" };
+        return validEnvironments.Contains(environment.ToUpper());
+    }
+
+    private Dictionary<string, object?> ExtractParameters(HttpRequest request, List<ApiParameter> configParams)
+    {
+        var parameters = new Dictionary<string, object?>();
+
+        // Extraer de query string
+        foreach (var query in request.Query)
+        {
+            if (query.Key != "idApi" && query.Key != "environment")
+            {
+                parameters[query.Key] = query.Value.ToString();
+            }
+        }
+
+        // Extraer de form (si es POST con form data)
+        if (request.HasFormContentType)
+        {
+            foreach (var form in request.Form)
+            {
+                parameters[form.Key] = form.Value.ToString();
+            }
+        }
+
+        return parameters;
+    }
+
+    private (bool IsValid, string? ErrorMessage) ValidateParameters(
+        Dictionary<string, object?> providedParams,
+        List<ApiParameter> configParams)
+    {
+        var errors = new List<string>();
+
+        foreach (var configParam in configParams)
+        {
+            var paramExists = providedParams.ContainsKey(configParam.NombreParametro);
+            var paramValue = paramExists ? providedParams[configParam.NombreParametro] : null;
+
+            // Validar par metros obligatorios
+            if (configParam.EsObligatorio && (paramValue == null || string.IsNullOrWhiteSpace(paramValue?.ToString())))
+            {
+                errors.Add($"Par metro '{configParam.NombreParametro}' es obligatorio");
+                continue;
+            }
+
+            // Si no es obligatorio y no est  presente, usar valor por defecto
+            if (!paramExists && !string.IsNullOrEmpty(configParam.ValorPorDefecto))
+            {
+                providedParams[configParam.NombreParametro] = configParam.ValorPorDefecto;
+                continue;
+            }
+
+            // Validar tipo de dato si el valor est  presente
+            if (paramValue != null && !ValidateParameterType(paramValue.ToString()!, configParam.TipoParametro))
+            {
+                errors.Add($"Par metro '{configParam.NombreParametro}' debe ser de tipo {configParam.TipoParametro}");
+            }
+        }
+
+        return (errors.Count == 0, errors.Count > 0 ? string.Join("; ", errors) : null);
+    }
+
+    private bool ValidateParameterType(string value, string expectedType)
+    {
+        return expectedType.ToUpper() switch
+        {
+            "INT" or "INTEGER" => int.TryParse(value, out _),
+            "BIGINT" => long.TryParse(value, out _),
+            "DECIMAL" or "FLOAT" or "DOUBLE" => decimal.TryParse(value, out _),
+            "DATETIME" or "DATE" => DateTime.TryParse(value, out _),
+            "BIT" or "BOOLEAN" => bool.TryParse(value, out _),
+            "STRING" or "NVARCHAR" or "VARCHAR" or "CHAR" => true, // Siempre v lido para strings
+            _ => true // Para tipos no reconocidos, asumir v lido
+        };
+    }
+
+    private string GenerateExampleCall(int idApi, List<ApiParameter> parameters)
+    {
+        var baseUrl = "/api/execute";
+        var queryParams = new List<string> { $"idApi={idApi}" };
+
+        foreach (var param in parameters.Where(p => p.EsObligatorio).Take(3)) // M ximo 3 para el ejemplo
+        {
+            var exampleValue = GetExampleValue(param.TipoParametro);
+            queryParams.Add($"{param.NombreParametro}={exampleValue}");
+        }
+
+        return $"{baseUrl}?{string.Join("&", queryParams)}";
+    }
+
+    private string GetExampleValue(string tipo)
+    {
+        return tipo.ToUpper() switch
+        {
+            "STRING" or "NVARCHAR" or "VARCHAR" or "CHAR" => "ejemplo",
+            "INT" or "INTEGER" or "BIGINT" => "123",
+            "DECIMAL" or "FLOAT" or "DOUBLE" => "123.45",
+            "DATETIME" or "DATE" => DateTime.Now.ToString("yyyy-MM-dd"),
+            "BIT" or "BOOLEAN" => "true",
+            _ => "valor"
+        };
+    }
+}using Microsoft.AspNetCore.Mvc;
+
+[ApiController]
+[Route("api/health")]
+public class HealthController : ControllerBase
+{
+    private readonly ILogger<HealthController> _logger;
+
+    public HealthController(ILogger<HealthController> logger)
+    {
+        _logger = logger;
+    }
+
+    /// <summary>
+    /// Health check de la API
+    /// </summary>
+    [HttpGet]
+    [ProducesResponseType(200)]
+    public IActionResult GetHealth()
+    {
+        return Ok(new
+        {
+            Status = "Healthy",
+            Timestamp = DateTime.UtcNow,
+            Version = GetType().Assembly.GetName().Version?.ToString() ?? "1.0.0",
+            Environment = Environment.GetEnvironmentVariable("ASPNETCORE_ENVIRONMENT") ?? "Production"
+        });
+    }
+
+    /// <summary>
+    /// Health check detallado con verificaci n de dependencias
+    /// </summary>
+    [HttpGet("detailed")]
+    [ProducesResponseType(200)]
+    [ProducesResponseType(503)]
+    public async Task<IActionResult> GetDetailedHealth([FromServices] IConfigurationService configService)
+    {
+        var healthChecks = new Dictionary<string, object>();
+        var overallStatus = "Healthy";
+
+        try
+        {
+            // Verificar conexi n a base de datos de configuraci n
+            var apis = await configService.GetAvailableApisAsync();
+            healthChecks["Database"] = new { Status = "Healthy", ApiCount = apis.Count };
+        }
+        catch (Exception ex)
+        {
+            healthChecks["Database"] = new { Status = "Unhealthy", Error = ex.Message };
+            overallStatus = "Unhealthy";
+        }
+
+        // Verificar memoria y rendimiento
+        var gcMemory = GC.GetTotalMemory(false);
+        healthChecks["Memory"] = new
+        {
+            Status = gcMemory < 500_000_000 ? "Healthy" : "Warning", // 500MB threshold
+            UsedBytes = gcMemory,
+            UsedMB = gcMemory / 1024 / 1024
+        };
+
+        var response = new
+        {
+            Status = overallStatus,
+            Timestamp = DateTime.UtcNow,
+            Checks = healthChecks,
+            Version = GetType().Assembly.GetName().Version?.ToString() ?? "1.0.0"
+        };
+
+        return overallStatus == "Healthy" ? Ok(response) : StatusCode(503, response);
+    }
+}using Microsoft.AspNetCore.Mvc;
+
+[ApiController]
+[Route("api/info")]
+public class InfoController : ControllerBase
+{
+    private readonly IConfigurationService _configService;
+    private readonly IAuditService _auditService;
+    private readonly ILogger<InfoController> _logger;
+
+    public InfoController(
+        IConfigurationService configService,
+        IAuditService auditService,
+        ILogger<InfoController> logger)
+    {
+        _configService = configService;
+        _auditService = auditService;
+        _logger = logger;
+    }
+
+    /// <summary>
+    /// Obtiene la lista de APIs disponibles y su documentaci n
+    /// </summary>
+    [HttpGet("apis")]
+    [ProducesResponseType(typeof(List<ApiInfo>), 200)]
+    [ProducesResponseType(typeof(ErrorResponse), 500)]
+    public async Task<IActionResult> GetAvailableApis()
+    {
+        try
+        {
+            var apis = await _configService.GetAvailableApisAsync();
+            return Ok(apis);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error obteniendo APIs disponibles");
+            return StatusCode(500, new ErrorResponse
+            {
+                Error = "INTERNAL_ERROR",
+                Message = "Error obteniendo APIs disponibles",
+                StatusCode = 500
+            });
+        }
+    }
+
+    /// <summary>
+    /// Obtiene informaci n espec fica de una API
+    /// </summary>
+    [HttpGet("apis/{idApi}")]
+    [ProducesResponseType(typeof(ApiInfo), 200)]
+    [ProducesResponseType(typeof(ErrorResponse), 404)]
+    [ProducesResponseType(typeof(ErrorResponse), 500)]
+    public async Task<IActionResult> GetApiInfo(int idApi)
+    {
+        try
+        {
+            var apis = await _configService.GetAvailableApisAsync();
+            var apiInfo = apis.FirstOrDefault(a => a.IdAPI == idApi);
+
+            if (apiInfo == null)
+            {
+                return NotFound(new ErrorResponse
+                {
+                    Error = "API_NOT_FOUND",
+                    Message = $"API con ID {idApi} no encontrada",
+                    StatusCode = 404
+                });
+            }
+
+            return Ok(apiInfo);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error obteniendo informaci n de API {IdAPI}", idApi);
+            return StatusCode(500, new ErrorResponse
+            {
+                Error = "INTERNAL_ERROR",
+                Message = "Error obteniendo informaci n de la API",
+                StatusCode = 500
+            });
+        }
+    }
+
+    /// <summary>
+    /// Obtiene estad sticas de uso de las APIs
+    /// </summary>
+    [HttpGet("statistics")]
+    [ProducesResponseType(typeof(List<UsageStatistics>), 200)]
+    [ProducesResponseType(typeof(ErrorResponse), 500)]
+    public async Task<IActionResult> GetUsageStatistics(
+        [FromQuery] int? idApi = null,
+        [FromQuery] DateTime? fechaDesde = null,
+        [FromQuery] DateTime? fechaHasta = null)
+    {
+        try
+        {
+            var statistics = await _auditService.GetUsageStatisticsAsync(idApi, fechaDesde, fechaHasta);
+            return Ok(statistics);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error obteniendo estad sticas de uso");
+            return StatusCode(500, new ErrorResponse
+            {
+                Error = "INTERNAL_ERROR",
+                Message = "Error obteniendo estad sticas de uso",
+                StatusCode = 500
+            });
+        }
+    }
+}﻿
+// =====================================================
+// SystemController - CONTROLLER PARA INFORMACIÓN DEL SISTEMA
+// =====================================================
+using Microsoft.AspNetCore.Mvc;
+using System.Diagnostics;
+
+[ApiController]
+[Route("api/system")]
+[Produces("application/json")]
+public class SystemController : ControllerBase
+{
+    private readonly IConfigurationService _configService;
+    private readonly IAuditService _auditService;
+    private readonly IAuthenticationService _authService;
+    private readonly ILogger<SystemController> _logger;
+
+    public SystemController(
+        IConfigurationService configService,
+        IAuditService auditService,
+        IAuthenticationService authService,
+        ILogger<SystemController> logger)
+    {
+        _configService = configService;
+        _auditService = auditService;
+        _authService = authService;
+        _logger = logger;
+    }
+
+    /// <summary>
+    /// Obtiene estadísticas generales del sistema
+    /// </summary>
+    [HttpGet("stats")]
+    [ProducesResponseType(typeof(object), 200)]
+    public async Task<IActionResult> GetSystemStats()
+    {
+        try
+        {
+            var apis = await _configService.GetAvailableApisAsync();
+            var authHealth = await _authService.GetSystemAuthHealthAsync();
+            var totalExecutions = await _auditService.GetTotalExecutionsAsync(DateTime.Now.AddDays(-30));
+            var avgExecutionTime = await _auditService.GetAverageExecutionTimeAsync(null, DateTime.Now.AddDays(-30));
+            var successRate = await _auditService.GetSuccessRateAsync(null, DateTime.Now.AddDays(-30));
+
+            var stats = new
+            {
+                System = new
+                {
+                    Version = "2.0.0",
+                    Environment = Environment.GetEnvironmentVariable("ASPNETCORE_ENVIRONMENT") ?? "Unknown",
+                    Uptime = DateTime.UtcNow - Process.GetCurrentProcess().StartTime.ToUniversalTime(),
+                    Timestamp = DateTime.UtcNow
+                },
+                APIs = new
+                {
+                    Total = apis.Count,
+                    authHealth.APIsWithAuth,
+                    PublicAPIs = authHealth.TotalAPIs - authHealth.APIsWithAuth
+                },
+                Authentication = new
+                {
+                    authHealth.IsHealthy,
+                    authHealth.TotalCredentials,
+                    authHealth.ActiveCredentials,
+                    authHealth.ExpiredCredentials,
+                    authHealth.AuthTypeDistribution
+                },
+                Usage = new
+                {
+                    TotalExecutions = totalExecutions,
+                    AvgExecutionTimeMs = Math.Round(avgExecutionTime, 2),
+                    SuccessRate = Math.Round(successRate, 2),
+                    Period = "Last 30 days"
+                },
+                Health = new
+                {
+                    Status = authHealth.IsHealthy ? "Healthy" : "Warning",
+                    Warnings = authHealth.Warnings,
+                    Errors = authHealth.Errors
+                }
+            };
+
+            return Ok(stats);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error obteniendo estadísticas del sistema");
+            return StatusCode(500, new ErrorResponse
+            {
+                Error = "INTERNAL_ERROR",
+                Message = "Error obteniendo estadísticas del sistema",
+                StatusCode = 500
+            });
+        }
+    }
+
+    /// <summary>
+    /// Obtiene logs de errores recientes
+    /// </summary>
+    [HttpGet("errors")]
+    [ProducesResponseType(typeof(object), 200)]
+    public async Task<IActionResult> GetRecentErrors([FromQuery] int count = 10)
+    {
+        try
+        {
+            var errors = await _auditService.GetRecentErrorsAsync(count);
+
+            return Ok(new
+            {
+                Success = true,
+                Count = errors.Count,
+                Errors = errors.Select(e => new
+                {
+                    e.IdAPI,
+                    e.NombreAPI,
+                    e.MensajeError,
+                    e.FechaEjecucion,
+                    e.DireccionIP,
+                    e.TipoAutenticacion,
+                    e.NombreCredencial
+                })
+            });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error obteniendo errores recientes");
+            return StatusCode(500, new ErrorResponse
+            {
+                Error = "INTERNAL_ERROR",
+                Message = "Error obteniendo errores del sistema",
+                StatusCode = 500
+            });
+        }
+    }
+}
